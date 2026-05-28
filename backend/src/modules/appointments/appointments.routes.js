@@ -1,0 +1,1225 @@
+const express = require("express");
+const { z } = require("zod");
+
+const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const {
+  authMiddleware,
+  allowRoles
+} = require("../../middleware/authMiddleware");
+
+const { USER_ROLES } = require("../users/user.roles");
+
+const router = express.Router();
+
+const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
+
+// For MVP/demo we use California offset.
+// Later we will replace this with proper timezone library like luxon/date-fns-tz.
+const DEFAULT_TIMEZONE_OFFSET = "-07:00";
+
+const slotQuerySchema = z.object({
+  date: z.string().regex(DATE_REGEX, "Use YYYY-MM-DD format"),
+  serviceId: z.string().min(1),
+  locationId: z.string().min(1),
+  appointmentType: z.enum(["telehealth", "in_person"]),
+  therapistId: z.string().optional(),
+  slotIntervalMinutes: z
+    .string()
+    .optional()
+    .transform(function (value) {
+      return value ? Number(value) : 30;
+    })
+});
+
+const createAppointmentSchema = z.object({
+  clientId: z.string().optional(),
+  serviceId: z.string().min(1),
+  locationId: z.string().min(1),
+  appointmentType: z.enum(["telehealth", "in_person"]),
+  date: z.string().regex(DATE_REGEX, "Use YYYY-MM-DD format"),
+  startTime: z.string().regex(TIME_REGEX, "Use HH:MM format"),
+  therapistId: z.string().optional(),
+  notes: z.string().max(1000).optional()
+});
+
+const updateAppointmentStatusSchema = z.object({
+  status: z.enum(["confirmed", "cancelled", "completed", "no_show"]),
+  reason: z.string().max(500).optional()
+});
+
+const rescheduleAppointmentSchema = z.object({
+  date: z.string().regex(DATE_REGEX, "Use YYYY-MM-DD format"),
+  startTime: z.string().regex(TIME_REGEX, "Use HH:MM format"),
+  therapistId: z.string().optional(),
+  allowDifferentTherapist: z.boolean().optional(),
+  notes: z.string().max(1000).optional()
+});
+
+function timeToMinutes(time) {
+  const parts = time.split(":");
+  return Number(parts[0]) * 60 + Number(parts[1]);
+}
+
+function minutesToTime(minutes) {
+  const hours = Math.floor(minutes / 60);
+  const mins = minutes % 60;
+
+  return String(hours).padStart(2, "0") + ":" + String(mins).padStart(2, "0");
+}
+
+function addMinutesToTime(time, minutesToAdd) {
+  return minutesToTime(timeToMinutes(time) + minutesToAdd);
+}
+
+function getDayOfWeek(dateString) {
+  return new Date(dateString + "T00:00:00Z").getUTCDay();
+}
+
+function rangesOverlap(startA, endA, startB, endB) {
+  return startA < endB && endA > startB;
+}
+
+function createDateTime(date, time) {
+  return date + "T" + time + ":00" + DEFAULT_TIMEZONE_OFFSET;
+}
+
+function sanitizeAppointment(appointment, db) {
+  const client = db.users.find(function (user) {
+    return user.id === appointment.clientId;
+  });
+
+  const therapist = db.therapists.find(function (item) {
+    return item.id === appointment.therapistId;
+  });
+
+  const therapistUser = therapist
+    ? db.users.find(function (user) {
+        return user.id === therapist.userId;
+      })
+    : null;
+
+  const service = db.services.find(function (item) {
+    return item.id === appointment.serviceId;
+  });
+
+  const location = db.locations.find(function (item) {
+    return item.id === appointment.locationId;
+  });
+
+  return {
+    id: appointment.id,
+    clientId: appointment.clientId,
+    clientName: client ? client.name : null,
+    clientEmail: client ? client.email : null,
+    therapistId: appointment.therapistId,
+    therapistName: therapistUser ? therapistUser.name : null,
+    serviceId: appointment.serviceId,
+    serviceName: service ? service.name : null,
+    locationId: appointment.locationId,
+    locationName: location ? location.name : null,
+    appointmentType: appointment.appointmentType,
+    date: appointment.date,
+    startTime: appointment.startTime,
+    endTime: appointment.endTime,
+    blockedStartTime: appointment.blockedStartTime,
+    blockedEndTime: appointment.blockedEndTime,
+    priceSnapshot: appointment.priceSnapshot,
+    currencySnapshot: appointment.currencySnapshot,
+    status: appointment.status,
+    notes: appointment.notes || "",
+    createdBy: appointment.createdBy,
+    createdAt: appointment.createdAt,
+    updatedAt: appointment.updatedAt || null
+  };
+}
+
+function sanitizeWaitlistEntry(entry, db) {
+  const client = db.users.find(function (user) {
+    return user.id === entry.clientId;
+  });
+
+  const service = db.services.find(function (service) {
+    return service.id === entry.serviceId;
+  });
+
+  const location = db.locations.find(function (location) {
+    return location.id === entry.locationId;
+  });
+
+  return {
+    id: entry.id,
+    clientId: entry.clientId,
+    clientName: client ? client.name : null,
+    clientEmail: client ? client.email : null,
+    serviceId: entry.serviceId,
+    serviceName: service ? service.name : null,
+    locationId: entry.locationId,
+    locationName: location ? location.name : null,
+    appointmentType: entry.appointmentType,
+    preferredDate: entry.preferredDate,
+    preferredStartTime: entry.preferredStartTime || "",
+    preferredEndTime: entry.preferredEndTime || "",
+    status: entry.status,
+    notes: entry.notes || "",
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt || null
+  };
+}
+
+function waitlistTimeMatches(entry, startTime) {
+  if (!entry.preferredStartTime && !entry.preferredEndTime) {
+    return true;
+  }
+
+  const slotMinutes = timeToMinutes(startTime);
+
+  if (entry.preferredStartTime && entry.preferredEndTime) {
+    return (
+      slotMinutes >= timeToMinutes(entry.preferredStartTime) &&
+      slotMinutes < timeToMinutes(entry.preferredEndTime)
+    );
+  }
+
+  if (entry.preferredStartTime) {
+    return slotMinutes >= timeToMinutes(entry.preferredStartTime);
+  }
+
+  if (entry.preferredEndTime) {
+    return slotMinutes < timeToMinutes(entry.preferredEndTime);
+  }
+
+  return true;
+}
+
+function getMatchingWaitlistForSlot(db, slotData) {
+  if (!db.waitlist) return [];
+
+  return db.waitlist
+    .filter(function (entry) {
+      return (
+        entry.status === "active" &&
+        entry.serviceId === slotData.serviceId &&
+        entry.locationId === slotData.locationId &&
+        entry.appointmentType === slotData.appointmentType &&
+        entry.preferredDate === slotData.date &&
+        waitlistTimeMatches(entry, slotData.startTime)
+      );
+    })
+    .map(function (entry) {
+      return sanitizeWaitlistEntry(entry, db);
+    });
+}
+
+function getActiveService(db, serviceId) {
+  return db.services.find(function (service) {
+    return service.id === serviceId && service.status === "active";
+  });
+}
+
+function getActiveLocation(db, locationId) {
+  return db.locations.find(function (location) {
+    return location.id === locationId && location.status === "active";
+  });
+}
+
+function getActiveClient(db, clientId) {
+  return db.users.find(function (user) {
+    return (
+      user.id === clientId &&
+      user.role === USER_ROLES.CLIENT &&
+      user.status === "active"
+    );
+  });
+}
+
+function matchesOptionalList(list, value) {
+  if (!list || !Array.isArray(list) || list.length === 0) {
+    return true;
+  }
+
+  return list.includes(value);
+}
+
+function getEligibleTherapists(db, serviceId, locationId, appointmentType, specificTherapistId) {
+  const assignments = db.therapistServices.filter(function (assignment) {
+    return (
+      assignment.serviceId === serviceId &&
+      assignment.status === "active" &&
+      matchesOptionalList(assignment.locationIds, locationId) &&
+      matchesOptionalList(assignment.appointmentTypes, appointmentType)
+    );
+  });
+
+  const therapistIds = Array.from(
+    new Set(
+      assignments.map(function (assignment) {
+        return assignment.therapistId;
+      })
+    )
+  );
+
+  return therapistIds
+    .map(function (therapistId) {
+      return db.therapists.find(function (therapist) {
+        return therapist.id === therapistId;
+      });
+    })
+    .filter(Boolean)
+    .filter(function (therapist) {
+      if (specificTherapistId && therapist.id !== specificTherapistId) {
+        return false;
+      }
+
+      if (therapist.profileStatus !== "active") {
+        return false;
+      }
+
+      if (!matchesOptionalList(therapist.appointmentTypes, appointmentType)) {
+        return false;
+      }
+
+      const therapistUser = db.users.find(function (user) {
+        return user.id === therapist.userId;
+      });
+
+      return therapistUser && therapistUser.status === "active";
+    });
+}
+
+function getServiceBlockedMinutes(service) {
+  return (
+    service.durationMinutes +
+    (service.bufferBeforeMinutes || 0) +
+    (service.bufferAfterMinutes || 0)
+  );
+}
+
+function computeAppointmentTimes(service, startTime) {
+  const bufferBefore = service.bufferBeforeMinutes || 0;
+  const bufferAfter = service.bufferAfterMinutes || 0;
+  const duration = service.durationMinutes;
+
+  const startMinutes = timeToMinutes(startTime);
+  const endMinutes = startMinutes + duration;
+  const blockedStartMinutes = startMinutes - bufferBefore;
+  const blockedEndMinutes = endMinutes + bufferAfter;
+
+  return {
+    startMinutes,
+    endMinutes,
+    blockedStartMinutes,
+    blockedEndMinutes,
+    endTime: minutesToTime(endMinutes),
+    blockedStartTime: minutesToTime(blockedStartMinutes),
+    blockedEndTime: minutesToTime(blockedEndMinutes)
+  };
+}
+
+function therapistHasWeeklyAvailability(
+  db,
+  therapistId,
+  date,
+  service,
+  startTime,
+  locationId,
+  appointmentType
+) {
+  const dayOfWeek = getDayOfWeek(date);
+  const times = computeAppointmentTimes(service, startTime);
+
+  if (times.blockedStartMinutes < 0 || times.blockedEndMinutes > 24 * 60) {
+    return false;
+  }
+
+  return db.therapistAvailability.some(function (rule) {
+    if (rule.status !== "active") return false;
+    if (rule.therapistId !== therapistId) return false;
+    if (rule.dayOfWeek !== dayOfWeek) return false;
+
+    if (!matchesOptionalList(rule.locationIds, locationId)) return false;
+    if (!matchesOptionalList(rule.appointmentTypes, appointmentType)) return false;
+
+    const ruleStart = timeToMinutes(rule.startTime);
+    const ruleEnd = timeToMinutes(rule.endTime);
+
+    return (
+      times.blockedStartMinutes >= ruleStart &&
+      times.blockedEndMinutes <= ruleEnd
+    );
+  });
+}
+
+function therapistHasTimeOff(db, therapistId, date, service, startTime) {
+  const times = computeAppointmentTimes(service, startTime);
+
+  const slotStartDateTime = new Date(
+    createDateTime(date, times.blockedStartTime)
+  ).getTime();
+
+  const slotEndDateTime = new Date(
+    createDateTime(date, times.blockedEndTime)
+  ).getTime();
+
+  return db.therapistTimeOff.some(function (block) {
+    if (block.status !== "active") return false;
+    if (block.therapistId !== therapistId) return false;
+
+    const blockStart = new Date(block.startDateTime).getTime();
+    const blockEnd = new Date(block.endDateTime).getTime();
+
+    return slotStartDateTime < blockEnd && slotEndDateTime > blockStart;
+  });
+}
+
+function therapistHasAppointmentConflict(db, therapistId, date, service, startTime) {
+  const times = computeAppointmentTimes(service, startTime);
+
+  return db.appointments.some(function (appointment) {
+    if (appointment.therapistId !== therapistId) return false;
+    if (appointment.date !== date) return false;
+    if (["cancelled", "no_show"].includes(appointment.status)) return false;
+
+    const existingStart = timeToMinutes(
+      appointment.blockedStartTime || appointment.startTime
+    );
+
+    const existingEnd = timeToMinutes(
+      appointment.blockedEndTime || appointment.endTime
+    );
+
+    return rangesOverlap(
+      times.blockedStartMinutes,
+      times.blockedEndMinutes,
+      existingStart,
+      existingEnd
+    );
+  });
+}
+
+function isTherapistAvailableForSlot(
+  db,
+  therapistId,
+  date,
+  service,
+  locationId,
+  appointmentType,
+  startTime
+) {
+  const hasWeeklyAvailability = therapistHasWeeklyAvailability(
+    db,
+    therapistId,
+    date,
+    service,
+    startTime,
+    locationId,
+    appointmentType
+  );
+
+  if (!hasWeeklyAvailability) return false;
+
+  const hasTimeOff = therapistHasTimeOff(
+    db,
+    therapistId,
+    date,
+    service,
+    startTime
+  );
+
+  if (hasTimeOff) return false;
+
+  const hasConflict = therapistHasAppointmentConflict(
+    db,
+    therapistId,
+    date,
+    service,
+    startTime
+  );
+
+  if (hasConflict) return false;
+
+  return true;
+}
+
+function countTherapistAppointments(db, therapistId, date) {
+  return db.appointments.filter(function (appointment) {
+    return (
+      appointment.therapistId === therapistId &&
+      appointment.date === date &&
+      !["cancelled", "no_show"].includes(appointment.status)
+    );
+  }).length;
+}
+
+function chooseTherapist(db, availableTherapists, date) {
+  const sorted = availableTherapists.slice().sort(function (a, b) {
+    const countA = countTherapistAppointments(db, a.id, date);
+    const countB = countTherapistAppointments(db, b.id, date);
+
+    return countA - countB;
+  });
+
+  return sorted[0];
+}
+
+function buildAvailableSlots(db, options) {
+  const service = getActiveService(db, options.serviceId);
+  const location = getActiveLocation(db, options.locationId);
+
+  if (!service || !location) {
+    return [];
+  }
+
+  const eligibleTherapists = getEligibleTherapists(
+    db,
+    options.serviceId,
+    options.locationId,
+    options.appointmentType,
+    options.therapistId
+  );
+
+  const slotMap = new Map();
+  const dayOfWeek = getDayOfWeek(options.date);
+  const slotIntervalMinutes = options.slotIntervalMinutes || 30;
+
+  eligibleTherapists.forEach(function (therapist) {
+    const rules = db.therapistAvailability.filter(function (rule) {
+      return (
+        rule.status === "active" &&
+        rule.therapistId === therapist.id &&
+        rule.dayOfWeek === dayOfWeek &&
+        matchesOptionalList(rule.locationIds, options.locationId) &&
+        matchesOptionalList(rule.appointmentTypes, options.appointmentType)
+      );
+    });
+
+    rules.forEach(function (rule) {
+      const ruleStart = timeToMinutes(rule.startTime);
+      const ruleEnd = timeToMinutes(rule.endTime);
+
+      const bufferBefore = service.bufferBeforeMinutes || 0;
+      const totalBlocked = getServiceBlockedMinutes(service);
+
+      const firstStart = ruleStart + bufferBefore;
+      const lastStart = ruleEnd - totalBlocked + bufferBefore;
+
+      for (
+        let current = firstStart;
+        current <= lastStart;
+        current += slotIntervalMinutes
+      ) {
+        const startTime = minutesToTime(current);
+
+        const isAvailable = isTherapistAvailableForSlot(
+          db,
+          therapist.id,
+          options.date,
+          service,
+          options.locationId,
+          options.appointmentType,
+          startTime
+        );
+
+        if (!isAvailable) continue;
+
+        if (!slotMap.has(startTime)) {
+          const appointmentTimes = computeAppointmentTimes(service, startTime);
+
+          slotMap.set(startTime, {
+            date: options.date,
+            startTime,
+            endTime: appointmentTimes.endTime,
+            serviceId: service.id,
+            serviceName: service.name,
+            locationId: location.id,
+            locationName: location.name,
+            appointmentType: options.appointmentType,
+            availableTherapistIds: []
+          });
+        }
+
+        slotMap.get(startTime).availableTherapistIds.push(therapist.id);
+      }
+    });
+  });
+
+  return Array.from(slotMap.values())
+    .map(function (slot) {
+      return {
+        date: slot.date,
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        serviceId: slot.serviceId,
+        serviceName: slot.serviceName,
+        locationId: slot.locationId,
+        locationName: slot.locationName,
+        appointmentType: slot.appointmentType,
+        availableTherapistCount: slot.availableTherapistIds.length,
+        availableTherapistIds: slot.availableTherapistIds
+      };
+    })
+    .sort(function (a, b) {
+      return timeToMinutes(a.startTime) - timeToMinutes(b.startTime);
+    });
+}
+
+// GET available appointment slots
+router.get(
+  "/slots",
+  authMiddleware,
+  allowRoles(
+    USER_ROLES.ADMIN,
+    USER_ROLES.OFFICE_MANAGER,
+    USER_ROLES.CLIENT
+  ),
+  function (req, res) {
+    const result = slotQuerySchema.safeParse(req.query);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid query",
+        errors: result.error.flatten()
+      });
+    }
+
+    const db = loadDB();
+
+    const service = getActiveService(db, result.data.serviceId);
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Active service not found"
+      });
+    }
+
+    const location = getActiveLocation(db, result.data.locationId);
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Active location not found"
+      });
+    }
+
+    const slots = buildAvailableSlots(db, result.data);
+
+    return res.json({
+      success: true,
+      count: slots.length,
+      slots
+    });
+  }
+);
+
+// CREATE appointment
+router.post(
+  "/",
+  authMiddleware,
+  allowRoles(
+    USER_ROLES.ADMIN,
+    USER_ROLES.OFFICE_MANAGER,
+    USER_ROLES.CLIENT
+  ),
+  function (req, res) {
+    const result = createAppointmentSchema.safeParse(req.body);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid input",
+        errors: result.error.flatten()
+      });
+    }
+
+    const db = loadDB();
+
+    const service = getActiveService(db, result.data.serviceId);
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Active service not found"
+      });
+    }
+
+    const location = getActiveLocation(db, result.data.locationId);
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Active location not found"
+      });
+    }
+
+    let clientId = result.data.clientId;
+
+    if (req.user.role === USER_ROLES.CLIENT) {
+      clientId = req.user.id;
+    }
+
+    if (!clientId) {
+      return res.status(400).json({
+        success: false,
+        message: "clientId is required for admin or office manager booking"
+      });
+    }
+
+    const client = getActiveClient(db, clientId);
+
+    if (!client) {
+      return res.status(404).json({
+        success: false,
+        message: "Active client user not found"
+      });
+    }
+
+    const eligibleTherapists = getEligibleTherapists(
+      db,
+      result.data.serviceId,
+      result.data.locationId,
+      result.data.appointmentType,
+      result.data.therapistId
+    );
+
+    const availableTherapists = eligibleTherapists.filter(function (therapist) {
+      return isTherapistAvailableForSlot(
+        db,
+        therapist.id,
+        result.data.date,
+        service,
+        result.data.locationId,
+        result.data.appointmentType,
+        result.data.startTime
+      );
+    });
+
+    if (!availableTherapists.length) {
+      return res.status(409).json({
+        success: false,
+        message: "No therapist available for this slot"
+      });
+    }
+
+    const assignedTherapist = result.data.therapistId
+      ? availableTherapists[0]
+      : chooseTherapist(db, availableTherapists, result.data.date);
+
+    const appointmentTimes = computeAppointmentTimes(
+      service,
+      result.data.startTime
+    );
+
+    const now = new Date().toISOString();
+
+    const appointment = {
+      id: Date.now().toString(),
+      clientId,
+      therapistId: assignedTherapist.id,
+      serviceId: service.id,
+      locationId: location.id,
+      appointmentType: result.data.appointmentType,
+      date: result.data.date,
+      startTime: result.data.startTime,
+      endTime: appointmentTimes.endTime,
+      blockedStartTime: appointmentTimes.blockedStartTime,
+      blockedEndTime: appointmentTimes.blockedEndTime,
+      startDateTime: createDateTime(result.data.date, result.data.startTime),
+      endDateTime: createDateTime(result.data.date, appointmentTimes.endTime),
+      status: "confirmed",
+      priceSnapshot: service.currentPrice,
+      currencySnapshot: service.currency || "USD",
+      notes: result.data.notes || "",
+      createdBy: req.user.email,
+      createdAt: now,
+      updatedAt: null
+    };
+
+    db.appointments.push(appointment);
+    saveDB(db);
+
+    addAuditLog(
+      "APPOINTMENT_CREATED",
+      req.user.email,
+      `Appointment booked for client ${client.email} with therapist profile ${assignedTherapist.id}`
+    );
+
+    return res.status(201).json({
+      success: true,
+      message: "Appointment booked successfully",
+      appointment: sanitizeAppointment(appointment, db)
+    });
+  }
+);
+
+// GET all appointments for admin / office manager
+router.get(
+  "/",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    let appointments = db.appointments;
+
+    if (req.query.date) {
+      appointments = appointments.filter(function (appointment) {
+        return appointment.date === req.query.date;
+      });
+    }
+
+    if (req.query.therapistId) {
+      appointments = appointments.filter(function (appointment) {
+        return appointment.therapistId === req.query.therapistId;
+      });
+    }
+
+    if (req.query.clientId) {
+      appointments = appointments.filter(function (appointment) {
+        return appointment.clientId === req.query.clientId;
+      });
+    }
+
+    const result = appointments.map(function (appointment) {
+      return sanitizeAppointment(appointment, db);
+    });
+
+    return res.json({
+      success: true,
+      count: result.length,
+      appointments: result
+    });
+  }
+);
+
+// GET my appointments
+router.get(
+  "/me",
+  authMiddleware,
+  allowRoles(USER_ROLES.CLIENT, USER_ROLES.THERAPIST),
+  function (req, res) {
+    const db = loadDB();
+
+    let appointments = [];
+
+    if (req.user.role === USER_ROLES.CLIENT) {
+      appointments = db.appointments.filter(function (appointment) {
+        return appointment.clientId === req.user.id;
+      });
+    }
+
+    if (req.user.role === USER_ROLES.THERAPIST) {
+      const therapistProfile = db.therapists.find(function (therapist) {
+        return therapist.userId === req.user.id;
+      });
+
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
+
+      appointments = db.appointments.filter(function (appointment) {
+        return appointment.therapistId === therapistProfile.id;
+      });
+    }
+
+    const result = appointments.map(function (appointment) {
+      return sanitizeAppointment(appointment, db);
+    });
+
+    return res.json({
+      success: true,
+      count: result.length,
+      appointments: result
+    });
+  }
+);
+
+// GET single appointment by id
+router.get(
+  "/:id",
+  authMiddleware,
+  allowRoles(
+    USER_ROLES.ADMIN,
+    USER_ROLES.OFFICE_MANAGER,
+    USER_ROLES.CLIENT,
+    USER_ROLES.THERAPIST
+  ),
+  function (req, res) {
+    const db = loadDB();
+
+    const appointment = db.appointments.find(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found"
+      });
+    }
+
+    if (
+      req.user.role === USER_ROLES.CLIENT &&
+      appointment.clientId !== req.user.id
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only view your own appointment"
+      });
+    }
+
+    if (req.user.role === USER_ROLES.THERAPIST) {
+      const therapistProfile = db.therapists.find(function (therapist) {
+        return therapist.userId === req.user.id;
+      });
+
+      if (!therapistProfile || appointment.therapistId !== therapistProfile.id) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own therapist appointments"
+        });
+      }
+    }
+
+    return res.json({
+      success: true,
+      appointment: sanitizeAppointment(appointment, db),
+      rescheduleHistory: appointment.rescheduleHistory || []
+    });
+  }
+);
+
+// RESCHEDULE appointment
+router.patch(
+  "/:id/reschedule",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
+  function (req, res) {
+    const result = rescheduleAppointmentSchema.safeParse(req.body);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid reschedule input",
+        errors: result.error.flatten()
+      });
+    }
+
+    const db = loadDB();
+
+    const appointment = db.appointments.find(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found"
+      });
+    }
+
+    if (
+      req.user.role === USER_ROLES.CLIENT &&
+      appointment.clientId !== req.user.id
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only reschedule your own appointment"
+      });
+    }
+
+    if (["cancelled", "completed", "no_show"].includes(appointment.status)) {
+      return res.status(400).json({
+        success: false,
+        message: "Only confirmed appointments can be rescheduled"
+      });
+    }
+
+    const service = getActiveService(db, appointment.serviceId);
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Active service not found"
+      });
+    }
+
+    const location = getActiveLocation(db, appointment.locationId);
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Active location not found"
+      });
+    }
+
+    // Important:
+    // While checking availability, temporarily remove this appointment
+    // so it does not conflict with itself.
+    const tempDb = {
+      ...db,
+      appointments: db.appointments.filter(function (item) {
+        return item.id !== appointment.id;
+      })
+    };
+
+    const allowDifferentTherapist =
+      result.data.allowDifferentTherapist !== false;
+
+    let assignedTherapist = null;
+
+    // Case 1: Admin/client selected specific therapist
+    if (result.data.therapistId) {
+      const eligibleTherapists = getEligibleTherapists(
+        tempDb,
+        appointment.serviceId,
+        appointment.locationId,
+        appointment.appointmentType,
+        result.data.therapistId
+      );
+
+      const availableTherapists = eligibleTherapists.filter(function (
+        therapist
+      ) {
+        return isTherapistAvailableForSlot(
+          tempDb,
+          therapist.id,
+          result.data.date,
+          service,
+          appointment.locationId,
+          appointment.appointmentType,
+          result.data.startTime
+        );
+      });
+
+      if (!availableTherapists.length) {
+        return res.status(409).json({
+          success: false,
+          message: "Selected therapist is not available for this new slot"
+        });
+      }
+
+      assignedTherapist = availableTherapists[0];
+    }
+
+    // Case 2: No therapist selected, try same therapist first
+    if (!assignedTherapist) {
+      const currentTherapistEligible = getEligibleTherapists(
+        tempDb,
+        appointment.serviceId,
+        appointment.locationId,
+        appointment.appointmentType,
+        appointment.therapistId
+      );
+
+      const currentTherapistAvailable = currentTherapistEligible.find(function (
+        therapist
+      ) {
+        return isTherapistAvailableForSlot(
+          tempDb,
+          therapist.id,
+          result.data.date,
+          service,
+          appointment.locationId,
+          appointment.appointmentType,
+          result.data.startTime
+        );
+      });
+
+      if (currentTherapistAvailable) {
+        assignedTherapist = currentTherapistAvailable;
+      }
+    }
+
+    // Case 3: Same therapist not available, assign another therapist if allowed
+    if (!assignedTherapist && allowDifferentTherapist) {
+      const eligibleTherapists = getEligibleTherapists(
+        tempDb,
+        appointment.serviceId,
+        appointment.locationId,
+        appointment.appointmentType
+      );
+
+      const availableTherapists = eligibleTherapists.filter(function (
+        therapist
+      ) {
+        return isTherapistAvailableForSlot(
+          tempDb,
+          therapist.id,
+          result.data.date,
+          service,
+          appointment.locationId,
+          appointment.appointmentType,
+          result.data.startTime
+        );
+      });
+
+      if (availableTherapists.length) {
+        assignedTherapist = chooseTherapist(
+          tempDb,
+          availableTherapists,
+          result.data.date
+        );
+      }
+    }
+
+    if (!assignedTherapist) {
+      return res.status(409).json({
+        success: false,
+        message: "No therapist available for the new slot"
+      });
+    }
+
+    const oldSchedule = {
+  therapistId: appointment.therapistId,
+  serviceId: appointment.serviceId,
+  locationId: appointment.locationId,
+  appointmentType: appointment.appointmentType,
+  date: appointment.date,
+  startTime: appointment.startTime,
+  endTime: appointment.endTime
+};
+
+    const appointmentTimes = computeAppointmentTimes(
+      service,
+      result.data.startTime
+    );
+
+    if (!appointment.rescheduleHistory) {
+      appointment.rescheduleHistory = [];
+    }
+
+    appointment.rescheduleHistory.push({
+      oldSchedule,
+      changedBy: req.user.email,
+      changedAt: new Date().toISOString()
+    });
+
+    appointment.therapistId = assignedTherapist.id;
+    appointment.date = result.data.date;
+    appointment.startTime = result.data.startTime;
+    appointment.endTime = appointmentTimes.endTime;
+    appointment.blockedStartTime = appointmentTimes.blockedStartTime;
+    appointment.blockedEndTime = appointmentTimes.blockedEndTime;
+    appointment.startDateTime = createDateTime(
+      result.data.date,
+      result.data.startTime
+    );
+    appointment.endDateTime = createDateTime(
+      result.data.date,
+      appointmentTimes.endTime
+    );
+    appointment.status = "confirmed";
+    appointment.updatedAt = new Date().toISOString();
+
+    if (result.data.notes) {
+      appointment.notes = result.data.notes;
+    }
+
+    saveDB(db);
+
+    addAuditLog(
+      "APPOINTMENT_RESCHEDULED",
+      req.user.email,
+      `Appointment ${appointment.id} rescheduled from ${oldSchedule.date} ${oldSchedule.startTime} to ${appointment.date} ${appointment.startTime}`
+    );
+
+    const matchingWaitlist = getMatchingWaitlistForSlot(db, oldSchedule);
+
+return res.json({
+  success: true,
+  message: "Appointment rescheduled successfully",
+  appointment: sanitizeAppointment(appointment, db),
+  oldSchedule,
+  matchingWaitlistCount: matchingWaitlist.length,
+  matchingWaitlist
+});
+  }
+);
+
+// UPDATE appointment status
+router.patch(
+  "/:id/status",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
+  function (req, res) {
+    const result = updateAppointmentStatusSchema.safeParse(req.body);
+
+    if (!result.success) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid status",
+        errors: result.error.flatten()
+      });
+    }
+
+    const db = loadDB();
+
+    const appointment = db.appointments.find(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (!appointment) {
+      return res.status(404).json({
+        success: false,
+        message: "Appointment not found"
+      });
+    }
+
+    if (
+      req.user.role === USER_ROLES.CLIENT &&
+      appointment.clientId !== req.user.id
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "You can only update your own appointment"
+      });
+    }
+
+    if (
+      req.user.role === USER_ROLES.CLIENT &&
+      !["cancelled"].includes(result.data.status)
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Client can only cancel appointment from this endpoint"
+      });
+    }
+
+    const oldSlot = {
+  serviceId: appointment.serviceId,
+  locationId: appointment.locationId,
+  appointmentType: appointment.appointmentType,
+  date: appointment.date,
+  startTime: appointment.startTime
+};
+
+    appointment.status = result.data.status;
+    appointment.statusReason = result.data.reason || "";
+    appointment.updatedAt = new Date().toISOString();
+
+    saveDB(db);
+
+    addAuditLog(
+      "APPOINTMENT_STATUS_UPDATED",
+      req.user.email,
+      `Appointment ${appointment.id} status changed to ${appointment.status}`
+    );
+
+   let matchingWaitlist = [];
+
+if (result.data.status === "cancelled") {
+  matchingWaitlist = getMatchingWaitlistForSlot(db, oldSlot);
+}
+
+return res.json({
+  success: true,
+  message: "Appointment status updated successfully",
+  appointment: sanitizeAppointment(appointment, db),
+  matchingWaitlistCount: matchingWaitlist.length,
+  matchingWaitlist
+});
+  }
+);
+
+module.exports = router;
