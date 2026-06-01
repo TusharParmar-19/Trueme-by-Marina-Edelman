@@ -335,4 +335,104 @@ router.patch(
   }
 );
 
+// PATCH location public booking visibility
+router.patch(
+  "/:id/public",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    const location = db.locations.find(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (!location) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found"
+      });
+    }
+
+    location.isPublicBookingEnabled = Boolean(req.body.isPublicBookingEnabled);
+    location.updatedAt = new Date().toISOString();
+
+    saveDB(db);
+
+    return res.json({
+      success: true,
+      message: location.isPublicBookingEnabled
+        ? "Location is now public"
+        : "Location is now hidden from clients",
+      location
+    });
+  }
+);
+
+// DELETE location
+router.delete(
+  "/:id",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    const locationIndex = db.locations.findIndex(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (locationIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Location not found"
+      });
+    }
+
+    const isUsedInAppointments = (db.appointments || []).some(function (
+      appointment
+    ) {
+      return appointment.locationId === req.params.id;
+    });
+
+    const isUsedInWaitlist = (db.waitlist || []).some(function (entry) {
+      return entry.locationId === req.params.id;
+    });
+
+    const isUsedInTherapistServices = (db.therapistServices || []).some(
+      function (assignment) {
+        return (assignment.locationIds || []).includes(req.params.id);
+      }
+    );
+
+    const isUsedInAvailability = (db.therapistAvailability || []).some(function (
+      rule
+    ) {
+      return (rule.locationIds || []).includes(req.params.id);
+    });
+
+    if (
+      isUsedInAppointments ||
+      isUsedInWaitlist ||
+      isUsedInTherapistServices ||
+      isUsedInAvailability
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This location is already used in appointments, waitlist, therapist assignments, or availability. Archive it instead of deleting."
+      });
+    }
+
+    const deletedLocation = db.locations.splice(locationIndex, 1)[0];
+
+    saveDB(db);
+
+    return res.json({
+      success: true,
+      message: "Location deleted successfully",
+      location: deletedLocation
+    });
+  }
+);
+
 module.exports = router;

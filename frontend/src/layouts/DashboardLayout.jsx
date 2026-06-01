@@ -18,7 +18,11 @@ function DashboardLayout({ children, title, subtitle }) {
       return [
         { label: "Dashboard", path: "/admin" },
         { label: "Appointments", path: "/admin/appointments" },
-        { label: "Waitlist", path: "/admin/waitlist" }
+        { label: "Waitlist", path: "/admin/waitlist" },
+        { label: "Therapists", path: "/admin/therapists" },
+        { label: "Clients", path: "/admin/clients" },
+        { label: "Services", path: "/admin/services" },
+        { label: "Locations", path: "/admin/locations" },
       ];
     }
 
@@ -26,7 +30,11 @@ function DashboardLayout({ children, title, subtitle }) {
       return [
         { label: "Dashboard", path: "/manager" },
         { label: "Appointments", path: "/manager/appointments" },
-        { label: "Waitlist", path: "/manager/waitlist" }
+        { label: "Waitlist", path: "/manager/waitlist" },
+        { label: "Therapists", path: "/manager/therapists" },
+        { label: "Clients", path: "/manager/clients" },
+        { label: "Services", path: "/manager/services" },
+        { label: "Locations", path: "/manager/locations" },
       ];
     }
 
@@ -57,15 +65,15 @@ function DashboardLayout({ children, title, subtitle }) {
         <nav className="sidebar-nav">
           {links.map((link) => (
             <NavLink
-  key={link.path}
-  to={link.path}
-  end={link.label === "Dashboard"}
-  className={({ isActive }) =>
-    isActive ? "nav-link active" : "nav-link"
-  }
->
-  {link.label}
-</NavLink>
+              key={link.path}
+              to={link.path}
+              end={link.label === "Dashboard"}
+              className={({ isActive }) =>
+                isActive ? "nav-link active" : "nav-link"
+              }
+            >
+              {link.label}
+            </NavLink>
           ))}
         </nav>
 

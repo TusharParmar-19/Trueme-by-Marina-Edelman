@@ -75,6 +75,28 @@ function appointmentSummary(appointment, db) {
   };
 }
 
+function waitlistSummary(entry, db) {
+  const service = getServiceById(db, entry.serviceId);
+  const location = getLocationById(db, entry.locationId);
+
+  return {
+    id: entry.id,
+    clientId: entry.clientId,
+    serviceId: entry.serviceId,
+    serviceName: service ? service.name : null,
+    locationId: entry.locationId,
+    locationName: location ? location.name : null,
+    appointmentType: entry.appointmentType,
+    preferredDate: entry.preferredDate,
+    preferredStartTime: entry.preferredStartTime || "",
+    preferredEndTime: entry.preferredEndTime || "",
+    status: entry.status,
+    notes: entry.notes || "",
+    createdAt: entry.createdAt,
+    updatedAt: entry.updatedAt || null
+  };
+}
+
 function sortAppointments(a, b) {
   const aValue = a.date + " " + a.startTime;
   const bValue = b.date + " " + b.startTime;
@@ -290,19 +312,21 @@ router.get(
     });
 
     return res.json({
-      success: true,
-      date,
-      summary: {
-        upcomingAppointments: upcomingAppointments.length,
-        pastAppointments: pastAppointments.length,
-        activeWaitlist: waitlistEntries.filter(function (entry) {
-          return entry.status === "active";
-        }).length
-      },
-      upcomingAppointments: getAppointmentList(db, upcomingAppointments, 10),
-      pastAppointments: getAppointmentList(db, pastAppointments, 10),
-      waitlist: waitlistEntries
-    });
+  success: true,
+  date,
+  summary: {
+    upcomingAppointments: upcomingAppointments.length,
+    pastAppointments: pastAppointments.length,
+    activeWaitlist: waitlistEntries.filter(function (entry) {
+      return entry.status === "active";
+    }).length
+  },
+  upcomingAppointments: getAppointmentList(db, upcomingAppointments, 10),
+  pastAppointments: getAppointmentList(db, pastAppointments, 10),
+  waitlist: waitlistEntries.map(function (entry) {
+    return waitlistSummary(entry, db);
+  })
+});
   }
 );
 

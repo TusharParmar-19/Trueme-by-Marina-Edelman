@@ -433,4 +433,97 @@ router.patch(
   }
 );
 
+// PATCH service public booking visibility
+router.patch(
+  "/:id/public",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    const service = db.services.find(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (!service) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found"
+      });
+    }
+
+    service.isPublicBookingEnabled = Boolean(req.body.isPublicBookingEnabled);
+    service.updatedAt = new Date().toISOString();
+
+    saveDB(db);
+
+    return res.json({
+      success: true,
+      message: service.isPublicBookingEnabled
+        ? "Service is now public"
+        : "Service is now hidden from clients",
+      service
+    });
+  }
+);
+
+// DELETE service
+router.delete(
+  "/:id",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    const serviceIndex = db.services.findIndex(function (item) {
+      return item.id === req.params.id;
+    });
+
+    if (serviceIndex === -1) {
+      return res.status(404).json({
+        success: false,
+        message: "Service not found"
+      });
+    }
+
+    const isUsedInAppointments = (db.appointments || []).some(function (
+      appointment
+    ) {
+      return appointment.serviceId === req.params.id;
+    });
+
+    const isUsedInWaitlist = (db.waitlist || []).some(function (entry) {
+      return entry.serviceId === req.params.id;
+    });
+
+    const isUsedInTherapistServices = (db.therapistServices || []).some(
+      function (assignment) {
+        return assignment.serviceId === req.params.id;
+      }
+    );
+
+    if (
+      isUsedInAppointments ||
+      isUsedInWaitlist ||
+      isUsedInTherapistServices
+    ) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This service is already used in appointments, waitlist, or therapist assignments. Archive it instead of deleting."
+      });
+    }
+
+    const deletedService = db.services.splice(serviceIndex, 1)[0];
+
+    saveDB(db);
+
+    return res.json({
+      success: true,
+      message: "Service deleted successfully",
+      service: deletedService
+    });
+  }
+);
+
 module.exports = router;

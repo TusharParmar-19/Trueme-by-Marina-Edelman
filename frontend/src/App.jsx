@@ -7,6 +7,10 @@ import ClientDashboard from "./pages/client/ClientDashboard";
 import AdminAppointments from "./pages/admin/AdminAppointments";
 import AdminWaitlist from "./pages/admin/AdminWaitlist";
 import ManagerDashboard from "./pages/manager/ManagerDashboard";
+import AdminTherapists from "./pages/admin/AdminTherapists";
+import AdminClients from "./pages/admin/AdminClients";
+import AdminServices from "./pages/admin/AdminServices";
+import AdminLocations from "./pages/admin/AdminLocations";
 
 import { getUser, isLoggedIn, hasRole } from "./utils/auth";
 
@@ -40,77 +44,149 @@ function App() {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
 
-     <Route
-  path="/admin"
-  element={
-    <ProtectedRoute roles={["admin"]}>
-      <AdminDashboard />
-    </ProtectedRoute>
-  }
-/>
-
-<Route
-  path="/admin/appointments"
-  element={
-    <ProtectedRoute roles={["admin"]}>
-      <AdminAppointments />
-    </ProtectedRoute>
-  }
-/>
-
-<Route
-  path="/admin/waitlist"
-  element={
-    <ProtectedRoute roles={["admin"]}>
-      <AdminWaitlist />
-    </ProtectedRoute>
-  }
-/>
-
-<Route
-  path="/manager"
-  element={
-    <ProtectedRoute roles={["office_manager"]}>
-      <ManagerDashboard />
-    </ProtectedRoute>
-  }
-/>
-
-<Route
-  path="/manager/appointments"
-  element={
-    <ProtectedRoute roles={["office_manager"]}>
-      <AdminAppointments />
-    </ProtectedRoute>
-  }
-/>
-
-<Route
-  path="/manager/waitlist"
-  element={
-    <ProtectedRoute roles={["office_manager"]}>
-      <AdminWaitlist />
-    </ProtectedRoute>
-  }
-/>
-
-     <Route
-  path="/therapist"
-  element={
-    <ProtectedRoute roles={["therapist"]}>
-      <TherapistDashboard />
-    </ProtectedRoute>
-  }
-/>
+      <Route
+        path="/admin"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminDashboard />
+          </ProtectedRoute>
+        }
+      />
 
       <Route
-  path="/client"
-  element={
-    <ProtectedRoute roles={["client"]}>
-      <ClientDashboard />
-    </ProtectedRoute>
-  }
-/>
+        path="/admin/appointments"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminAppointments />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin/waitlist"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminWaitlist />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin/therapists"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminTherapists />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin/clients"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminClients />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin/services"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminServices />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin/locations"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminLocations />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <ManagerDashboard />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/appointments"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminAppointments />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/waitlist"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminWaitlist />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/therapists"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminTherapists />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/clients"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminClients />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/services"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminServices />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/locations"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminLocations />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/therapist"
+        element={
+          <ProtectedRoute roles={["therapist"]}>
+            <TherapistDashboard />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/client"
+        element={
+          <ProtectedRoute roles={["client"]}>
+            <ClientDashboard />
+          </ProtectedRoute>
+        }
+      />
 
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>

@@ -116,6 +116,79 @@ router.get(
   }
 );
 
+// GET public therapists for booking
+router.get(
+  "/public",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
+  function (req, res) {
+    const db = loadDB();
+
+    const serviceId = req.query.serviceId;
+    const locationId = req.query.locationId;
+    const appointmentType = req.query.appointmentType;
+
+    let therapists = db.therapists.filter(function (therapist) {
+      return (
+        therapist.profileStatus === "active" &&
+        therapist.isPublicBookingEnabled === true
+      );
+    });
+
+    if (serviceId || locationId || appointmentType) {
+      therapists = therapists.filter(function (therapist) {
+        return (db.therapistServices || []).some(function (assignment) {
+          const serviceMatches = !serviceId || assignment.serviceId === serviceId;
+
+          const locationMatches =
+            !locationId ||
+            !assignment.locationIds ||
+            assignment.locationIds.length === 0 ||
+            assignment.locationIds.includes(locationId);
+
+          const appointmentTypeMatches =
+            !appointmentType ||
+            !assignment.appointmentTypes ||
+            assignment.appointmentTypes.length === 0 ||
+            assignment.appointmentTypes.includes(appointmentType);
+
+          return (
+            assignment.therapistId === therapist.id &&
+            assignment.status === "active" &&
+            serviceMatches &&
+            locationMatches &&
+            appointmentTypeMatches
+          );
+        });
+      });
+    }
+
+    const result = therapists.map(function (therapist) {
+      const user = db.users.find(function (item) {
+        return item.id === therapist.userId;
+      });
+
+      return {
+        id: therapist.id,
+        userId: therapist.userId,
+        name: user ? user.name : null,
+        email: user ? user.email : null,
+        title: therapist.title,
+        bio: therapist.bio,
+        focusAreas: therapist.focusAreas || [],
+        treatmentApproaches: therapist.treatmentApproaches || [],
+        appointmentTypes: therapist.appointmentTypes || []
+      };
+    });
+
+    return res.json({
+      success: true,
+      count: result.length,
+      therapists: result
+    });
+  }
+);
+
 // GET single therapist profile by profile id
 router.get(
   "/:id",
@@ -358,5 +431,69 @@ router.patch(
     });
   }
 );
+
+// GET public therapists for booking
+router.get("/public", authMiddleware, function (req, res) {
+  const db = loadDB();
+
+  const serviceId = req.query.serviceId;
+  const locationId = req.query.locationId;
+  const appointmentType = req.query.appointmentType;
+
+  let therapists = db.therapists.filter(function (therapist) {
+    return (
+      therapist.profileStatus === "active" &&
+      therapist.isPublicBookingEnabled === true
+    );
+  });
+
+  if (serviceId || locationId || appointmentType) {
+    therapists = therapists.filter(function (therapist) {
+      return db.therapistServices.some(function (assignment) {
+        const serviceMatches = !serviceId || assignment.serviceId === serviceId;
+
+        const locationMatches =
+          !locationId ||
+          (assignment.locationIds || []).includes(locationId);
+
+        const appointmentTypeMatches =
+          !appointmentType ||
+          (assignment.appointmentTypes || []).includes(appointmentType);
+
+        return (
+          assignment.therapistId === therapist.id &&
+          assignment.status === "active" &&
+          serviceMatches &&
+          locationMatches &&
+          appointmentTypeMatches
+        );
+      });
+    });
+  }
+
+  const result = therapists.map(function (therapist) {
+    const user = db.users.find(function (item) {
+      return item.id === therapist.userId;
+    });
+
+    return {
+      id: therapist.id,
+      userId: therapist.userId,
+      name: user ? user.name : null,
+      email: user ? user.email : null,
+      title: therapist.title,
+      bio: therapist.bio,
+      focusAreas: therapist.focusAreas || [],
+      treatmentApproaches: therapist.treatmentApproaches || [],
+      appointmentTypes: therapist.appointmentTypes || []
+    };
+  });
+
+  return res.json({
+    success: true,
+    count: result.length,
+    therapists: result
+  });
+});
 
 module.exports = router;
