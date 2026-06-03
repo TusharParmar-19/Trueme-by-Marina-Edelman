@@ -5,6 +5,51 @@ import { apiRequest } from "../../api/apiClient";
 import { getUser, logout } from "../../utils/auth";
 import DashboardLayout from "../../layouts/DashboardLayout";
 
+function getLocationType(location) {
+  if (!location) {
+    return "";
+  }
+
+  const rawType = location.locationType || location.type || "";
+  const normalizedType = String(rawType).toLowerCase();
+
+  if (normalizedType === "virtual") {
+    return "virtual";
+  }
+
+  if (normalizedType === "office") {
+    return "office";
+  }
+
+  const name = String(
+    location.name || location.locationName || "",
+  ).toLowerCase();
+
+  if (
+    name.includes("virtual") ||
+    name.includes("online") ||
+    name.includes("telehealth")
+  ) {
+    return "virtual";
+  }
+
+  return "office";
+}
+
+function getAppointmentTypeForLocation(location) {
+  const locationType = getLocationType(location);
+
+  if (locationType === "virtual") {
+    return "telehealth";
+  }
+
+  if (locationType === "office") {
+    return "in_person";
+  }
+
+  return "";
+}
+
 function ClientDashboard() {
   const navigate = useNavigate();
   const user = getUser();
@@ -66,13 +111,38 @@ function ClientDashboard() {
   }
 
   function isVirtualLocation(location) {
-    const name = (location.name || "").toLowerCase();
+    if (!location) {
+      return false;
+    }
+
+    const rawType = location.locationType || location.type || "";
+    const normalizedType = String(rawType).toLowerCase();
+
+    if (normalizedType === "virtual") {
+      return true;
+    }
+
+    if (normalizedType === "office") {
+      return false;
+    }
+
+    const name = String(
+      location.name || location.locationName || "",
+    ).toLowerCase();
 
     return (
       name.includes("virtual") ||
       name.includes("online") ||
       name.includes("telehealth")
     );
+  }
+
+  function getAppointmentTypeForLocation(location) {
+    if (isVirtualLocation(location)) {
+      return "telehealth";
+    }
+
+    return "in_person";
   }
 
   function getVirtualLocation() {
@@ -243,6 +313,21 @@ function ClientDashboard() {
       return;
     }
 
+    const selectedLocation = locations.find((location) => {
+      return location.id === bookingForm.locationId;
+    });
+
+    const expectedAppointmentType =
+      getAppointmentTypeForLocation(selectedLocation);
+
+    if (
+      expectedAppointmentType &&
+      bookingForm.appointmentType !== expectedAppointmentType
+    ) {
+      setError("Appointment type does not match the selected location.");
+      return;
+    }
+
     setSlotLoading(true);
 
     try {
@@ -315,6 +400,21 @@ function ClientDashboard() {
       return;
     }
 
+    const selectedLocation = locations.find((location) => {
+      return location.id === bookingForm.locationId;
+    });
+
+    const expectedAppointmentType =
+      getAppointmentTypeForLocation(selectedLocation);
+
+    if (
+      expectedAppointmentType &&
+      bookingForm.appointmentType !== expectedAppointmentType
+    ) {
+      setError("Appointment type does not match the selected location.");
+      return;
+    }
+
     if (!bookingForm.startTime) {
       setError(
         "Please click Find Available Slots and select a slot before booking.",
@@ -380,24 +480,40 @@ function ClientDashboard() {
   }
 
   function handleBookingChange(event) {
-    const nextForm = {
-      ...bookingForm,
-      [event.target.name]: event.target.value,
-      startTime: "",
-    };
+    const { name, value } = event.target;
 
-    if (
-      event.target.name === "serviceId" ||
-      event.target.name === "locationId" ||
-      event.target.name === "appointmentType"
-    ) {
-      nextForm.therapistId = "";
-      loadTherapistsForSelection(nextForm);
+    if (name === "locationId") {
+      const selectedLocation = locations.find((location) => {
+        return location.id === value;
+      });
+
+      const appointmentType = getAppointmentTypeForLocation(selectedLocation);
+
+      setBookingForm({
+        ...bookingForm,
+        locationId: value,
+        appointmentType,
+        slot: "",
+        selectedSlot: "",
+      });
+
+      setSlots([]);
+      return;
     }
 
-    setBookingForm(nextForm);
-    setSlots([]);
-    setSuggestedSlots([]);
+    setBookingForm({
+      ...bookingForm,
+      [name]: value,
+    });
+
+    if (
+      name === "serviceId" ||
+      name === "therapistId" ||
+      name === "therapistPreference" ||
+      name === "appointmentType"
+    ) {
+      setSlots([]);
+    }
   }
 
   function handleLogout() {

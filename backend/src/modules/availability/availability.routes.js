@@ -4,7 +4,7 @@ const { z } = require("zod");
 const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
 const {
   authMiddleware,
-  allowRoles
+  allowRoles,
 } = require("../../middleware/authMiddleware");
 
 const { USER_ROLES } = require("../users/user.roles");
@@ -20,7 +20,7 @@ const DAY_NAMES = {
   3: "Wednesday",
   4: "Thursday",
   5: "Friday",
-  6: "Saturday"
+  6: "Saturday",
 };
 
 const TIME_OFF_TYPES = [
@@ -29,7 +29,7 @@ const TIME_OFF_TYPES = [
   "personal",
   "blocked_time",
   "holiday",
-  "other"
+  "other",
 ];
 
 const createWeeklyAvailabilitySchema = z.object({
@@ -37,19 +37,21 @@ const createWeeklyAvailabilitySchema = z.object({
   dayOfWeek: z.number().int().min(0).max(6),
   startTime: z.string().regex(TIME_REGEX, "Use HH:MM format"),
   endTime: z.string().regex(TIME_REGEX, "Use HH:MM format"),
+  locationId: z.string().min(1).optional(),
   locationIds: z.array(z.string().min(1)).optional(),
   appointmentTypes: z.array(z.enum(["telehealth", "in_person"])).optional(),
-  notes: z.string().max(1000).optional()
+  status: z.enum(["active", "inactive"]).optional(),
+  notes: z.string().max(1000).optional(),
 });
 
 const updateWeeklyAvailabilitySchema = createWeeklyAvailabilitySchema
   .omit({
-    therapistId: true
+    therapistId: true,
   })
   .partial();
 
 const updateWeeklyStatusSchema = z.object({
-  status: z.enum(["active", "inactive"])
+  status: z.enum(["active", "inactive"]),
 });
 
 const createTimeOffSchema = z.object({
@@ -58,17 +60,17 @@ const createTimeOffSchema = z.object({
   endDateTime: z.string().min(1),
   type: z.enum(TIME_OFF_TYPES),
   reason: z.string().max(500).optional(),
-  notes: z.string().max(1000).optional()
+  notes: z.string().max(1000).optional(),
 });
 
 const updateTimeOffSchema = createTimeOffSchema
   .omit({
-    therapistId: true
+    therapistId: true,
   })
   .partial();
 
 const updateTimeOffStatusSchema = z.object({
-  status: z.enum(["active", "cancelled"])
+  status: z.enum(["active", "cancelled"]),
 });
 
 function timeToMinutes(time) {
@@ -89,12 +91,13 @@ function sanitizeAvailability(rule) {
     dayName: DAY_NAMES[rule.dayOfWeek],
     startTime: rule.startTime,
     endTime: rule.endTime,
-    locationIds: rule.locationIds || [],
+    locationId: rule.locationId || (rule.locationIds || [])[0] || null,
+    locationIds: rule.locationIds || (rule.locationId ? [rule.locationId] : []),
     appointmentTypes: rule.appointmentTypes || [],
     notes: rule.notes || "",
     status: rule.status,
     createdAt: rule.createdAt,
-    updatedAt: rule.updatedAt || null
+    updatedAt: rule.updatedAt || null,
   };
 }
 
@@ -109,7 +112,7 @@ function sanitizeTimeOff(block) {
     notes: block.notes || "",
     status: block.status,
     createdAt: block.createdAt,
-    updatedAt: block.updatedAt || null
+    updatedAt: block.updatedAt || null,
   };
 }
 
@@ -136,6 +139,186 @@ function validateDateTimeRange(startDateTime, endDateTime) {
   return new Date(endDateTime).getTime() > new Date(startDateTime).getTime();
 }
 
+function getLocationIdsFromData(data, fallbackRule) {
+  if (data.locationId) {
+    return [data.locationId];
+  }
+
+  if (Array.isArray(data.locationIds)) {
+    return data.locationIds;
+  }
+
+  if (fallbackRule) {
+    if (fallbackRule.locationId) {
+      return [fallbackRule.locationId];
+    }
+
+    if (Array.isArray(fallbackRule.locationIds)) {
+      return fallbackRule.locationIds;
+    }
+  }
+
+  return [];
+}
+
+function findDifferentLocationRuleForDay(
+  db,
+  therapistId,
+  dayOfWeek,
+  locationIds,
+  excludeRuleId,
+) {
+  if (!locationIds || locationIds.length === 0) {
+    return null;
+  }
+
+  return (db.therapistAvailability || []).find(function (rule) {
+    if (excludeRuleId && rule.id === excludeRuleId) {
+      return false;
+    }
+
+    const existingLocationIds = getLocationIdsFromData({}, rule);
+
+    const hasDifferentLocation =
+      existingLocationIds.length > 0 &&
+      !locationIds.every(function (locationId) {
+        return existingLocationIds.includes(locationId);
+      });
+
+    return (
+      rule.therapistId === therapistId &&
+      Number(rule.dayOfWeek) === Number(dayOfWeek) &&
+      rule.status !== "inactive" &&
+      rule.status !== "archived" &&
+      hasDifferentLocation
+    );
+  });
+}
+
+function buildAvailabilityWithNames(db, rule) {
+  const therapist = (db.therapists || []).find(function (item) {
+    return item.id === rule.therapistId;
+  });
+
+  const therapistUser = therapist
+    ? (db.users || []).find(function (user) {
+        return user.id === therapist.userId;
+      })
+    : null;
+
+  const locationIds = getLocationIdsFromData({}, rule);
+
+  const locations = locationIds
+    .map(function (locationId) {
+      return (db.locations || []).find(function (location) {
+        return location.id === locationId;
+      });
+    })
+    .filter(Boolean)
+    .map(function (location) {
+      return {
+        id: location.id,
+        name: location.name,
+        locationType: location.locationType,
+      };
+    });
+
+  return {
+    ...sanitizeAvailability(rule),
+    therapistName: therapistUser ? therapistUser.name : null,
+    therapistEmail: therapistUser ? therapistUser.email : null,
+    locations,
+  };
+}
+
+function getLocationIdsFromData(data, fallbackRule) {
+  if (data.locationId) {
+    return [data.locationId];
+  }
+
+  if (Array.isArray(data.locationIds)) {
+    return data.locationIds;
+  }
+
+  if (fallbackRule) {
+    if (fallbackRule.locationId) {
+      return [fallbackRule.locationId];
+    }
+
+    if (Array.isArray(fallbackRule.locationIds)) {
+      return fallbackRule.locationIds;
+    }
+  }
+
+  return [];
+}
+
+function findDifferentLocationRuleForDay(
+  db,
+  therapistId,
+  dayOfWeek,
+  locationIds,
+  excludeRuleId,
+) {
+  if (!locationIds || locationIds.length === 0) {
+    return null;
+  }
+
+  return db.therapistAvailability.find(function (rule) {
+    if (excludeRuleId && rule.id === excludeRuleId) {
+      return false;
+    }
+
+    const existingLocationIds = getLocationIdsFromData({}, rule);
+
+    const hasDifferentLocation =
+      existingLocationIds.length > 0 &&
+      !locationIds.every(function (locationId) {
+        return existingLocationIds.includes(locationId);
+      });
+
+    return (
+      rule.therapistId === therapistId &&
+      Number(rule.dayOfWeek) === Number(dayOfWeek) &&
+      rule.status !== "inactive" &&
+      rule.status !== "archived" &&
+      hasDifferentLocation
+    );
+  });
+}
+
+// GET all weekly availability for admin table
+router.get(
+  "/weekly",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    if (!db.therapistAvailability) {
+      db.therapistAvailability = [];
+    }
+
+    let rules = db.therapistAvailability;
+
+    if (req.query.therapistId) {
+      rules = rules.filter(function (rule) {
+        return rule.therapistId === req.query.therapistId;
+      });
+    }
+
+    const availability = rules.map(function (rule) {
+      return buildAvailabilityWithNames(db, rule);
+    });
+
+    return res.json({
+      success: true,
+      count: availability.length,
+      availability,
+    });
+  },
+);
+
 // GET therapist full availability summary
 router.get(
   "/therapists/:therapistId/summary",
@@ -149,14 +332,14 @@ router.get(
     if (!therapistProfile) {
       return res.status(404).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Therapist profile not found",
       });
     }
 
     if (!canTherapistAccessProfile(req, therapistProfile)) {
       return res.status(403).json({
         success: false,
-        message: "You can only view your own availability"
+        message: "You can only view your own availability",
       });
     }
 
@@ -180,9 +363,9 @@ router.get(
       success: true,
       therapistId: req.params.therapistId,
       weeklyAvailability,
-      timeOff
+      timeOff,
     });
-  }
+  },
 );
 
 // GET weekly availability for therapist
@@ -198,14 +381,14 @@ router.get(
     if (!therapistProfile) {
       return res.status(404).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Therapist profile not found",
       });
     }
 
     if (!canTherapistAccessProfile(req, therapistProfile)) {
       return res.status(403).json({
         success: false,
-        message: "You can only view your own availability"
+        message: "You can only view your own availability",
       });
     }
 
@@ -220,9 +403,72 @@ router.get(
     return res.json({
       success: true,
       count: availability.length,
-      availability
+      availability,
     });
-  }
+  },
+);
+
+// GET all weekly availability for admin table
+router.get(
+  "/weekly",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    if (!db.therapistAvailability) {
+      db.therapistAvailability = [];
+    }
+
+    let rules = db.therapistAvailability;
+
+    if (req.query.therapistId) {
+      rules = rules.filter(function (rule) {
+        return rule.therapistId === req.query.therapistId;
+      });
+    }
+
+    const availability = rules.map(function (rule) {
+      const therapist = db.therapists.find(function (item) {
+        return item.id === rule.therapistId;
+      });
+
+      const therapistUser = therapist
+        ? db.users.find(function (user) {
+            return user.id === therapist.userId;
+          })
+        : null;
+
+      const locationIds = getLocationIdsFromData({}, rule);
+
+      const locations = locationIds
+        .map(function (locationId) {
+          return db.locations.find(function (location) {
+            return location.id === locationId;
+          });
+        })
+        .filter(Boolean);
+
+      return {
+        ...sanitizeAvailability(rule),
+        therapistName: therapistUser ? therapistUser.name : null,
+        therapistEmail: therapistUser ? therapistUser.email : null,
+        locations: locations.map(function (location) {
+          return {
+            id: location.id,
+            name: location.name,
+            locationType: location.locationType,
+          };
+        }),
+      };
+    });
+
+    return res.json({
+      success: true,
+      count: availability.length,
+      availability,
+    });
+  },
 );
 
 // CREATE weekly availability
@@ -237,42 +483,77 @@ router.post(
       return res.status(400).json({
         success: false,
         message: "Invalid input",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
     if (!validateTimeRange(result.data.startTime, result.data.endTime)) {
       return res.status(400).json({
         success: false,
-        message: "End time must be after start time"
+        message: "End time must be after start time",
       });
     }
 
     const db = loadDB();
+
+    if (!db.therapistAvailability) {
+      db.therapistAvailability = [];
+    }
 
     const therapistProfile = findTherapistProfile(db, result.data.therapistId);
 
     if (!therapistProfile) {
       return res.status(404).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Therapist profile not found",
       });
     }
 
-    const duplicate = db.therapistAvailability.find(function (rule) {
+    const incomingLocationIds = getLocationIdsFromData(result.data);
+
+    const existingRule = db.therapistAvailability.find(function (rule) {
       return (
         rule.therapistId === result.data.therapistId &&
-        rule.dayOfWeek === result.data.dayOfWeek &&
+        Number(rule.dayOfWeek) === Number(result.data.dayOfWeek) &&
         rule.startTime === result.data.startTime &&
         rule.endTime === result.data.endTime &&
-        rule.status !== "inactive"
+        rule.status !== "archived"
       );
     });
 
-    if (duplicate) {
+    const conflictingLocationRule = findDifferentLocationRuleForDay(
+      db,
+      result.data.therapistId,
+      result.data.dayOfWeek,
+      incomingLocationIds,
+      existingRule ? existingRule.id : null,
+    );
+
+    if (conflictingLocationRule) {
       return res.status(400).json({
         success: false,
-        message: "Availability rule already exists for this day and time"
+        message:
+          "This therapist already has availability at another location for this day. A therapist can be available at only one location per day.",
+      });
+    }
+
+    if (existingRule) {
+      existingRule.locationId = incomingLocationIds[0] || null;
+      existingRule.locationIds = incomingLocationIds;
+      existingRule.appointmentTypes =
+        result.data.appointmentTypes || existingRule.appointmentTypes || [];
+      existingRule.notes = result.data.notes || existingRule.notes || "";
+      existingRule.startTime = result.data.startTime;
+      existingRule.endTime = result.data.endTime;
+      existingRule.status = result.data.status || "active";
+      existingRule.updatedAt = new Date().toISOString();
+
+      saveDB(db);
+
+      return res.json({
+        success: true,
+        message: "Availability rule updated successfully",
+        availability: sanitizeAvailability(existingRule),
       });
     }
 
@@ -284,12 +565,13 @@ router.post(
       dayOfWeek: result.data.dayOfWeek,
       startTime: result.data.startTime,
       endTime: result.data.endTime,
-      locationIds: result.data.locationIds || [],
+      locationId: incomingLocationIds[0] || null,
+      locationIds: incomingLocationIds,
       appointmentTypes: result.data.appointmentTypes || [],
       notes: result.data.notes || "",
-      status: "active",
+      status: result.data.status || "active",
       createdAt: now,
-      updatedAt: null
+      updatedAt: null,
     };
 
     db.therapistAvailability.push(availabilityRule);
@@ -298,15 +580,15 @@ router.post(
     addAuditLog(
       "THERAPIST_AVAILABILITY_CREATED",
       req.user.email,
-      `Created availability for therapist profile ${result.data.therapistId}`
+      `Created availability for therapist profile ${result.data.therapistId}`,
     );
 
     return res.status(201).json({
       success: true,
       message: "Therapist availability created successfully",
-      availability: sanitizeAvailability(availabilityRule)
+      availability: sanitizeAvailability(availabilityRule),
     });
-  }
+  },
 );
 
 // UPDATE weekly availability
@@ -321,11 +603,15 @@ router.patch(
       return res.status(400).json({
         success: false,
         message: "Invalid input",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
     const db = loadDB();
+
+    if (!db.therapistAvailability) {
+      db.therapistAvailability = [];
+    }
 
     const rule = db.therapistAvailability.find(function (item) {
       return item.id === req.params.id;
@@ -334,34 +620,62 @@ router.patch(
     if (!rule) {
       return res.status(404).json({
         success: false,
-        message: "Availability rule not found"
+        message: "Availability rule not found",
       });
     }
 
     const newStartTime = result.data.startTime || rule.startTime;
     const newEndTime = result.data.endTime || rule.endTime;
+    const newDayOfWeek =
+      result.data.dayOfWeek !== undefined
+        ? result.data.dayOfWeek
+        : rule.dayOfWeek;
 
     if (!validateTimeRange(newStartTime, newEndTime)) {
       return res.status(400).json({
         success: false,
-        message: "End time must be after start time"
+        message: "End time must be after start time",
       });
     }
 
-    const allowedFields = [
-      "dayOfWeek",
-      "startTime",
-      "endTime",
-      "locationIds",
-      "appointmentTypes",
-      "notes"
-    ];
+    const newLocationIds = getLocationIdsFromData(result.data, rule);
 
-    allowedFields.forEach(function (field) {
-      if (Object.prototype.hasOwnProperty.call(result.data, field)) {
-        rule[field] = result.data[field];
-      }
-    });
+    if (newLocationIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Please select a location for this availability rule",
+      });
+    }
+
+    const conflictingLocationRule = findDifferentLocationRuleForDay(
+      db,
+      rule.therapistId,
+      newDayOfWeek,
+      newLocationIds,
+      rule.id,
+    );
+
+    if (conflictingLocationRule) {
+      return res.status(400).json({
+        success: false,
+        message:
+          "This therapist already has availability at another location for this day. A therapist can be available at only one location per day.",
+      });
+    }
+
+    rule.dayOfWeek = newDayOfWeek;
+    rule.startTime = newStartTime;
+    rule.endTime = newEndTime;
+    rule.locationId = newLocationIds[0] || null;
+    rule.locationIds = newLocationIds;
+
+    if (Object.prototype.hasOwnProperty.call(result.data, "appointmentTypes")) {
+      rule.appointmentTypes = result.data.appointmentTypes || [];
+    }
+
+    if (Object.prototype.hasOwnProperty.call(result.data, "notes")) {
+      rule.notes = result.data.notes || "";
+    }
 
     rule.updatedAt = new Date().toISOString();
 
@@ -370,15 +684,15 @@ router.patch(
     addAuditLog(
       "THERAPIST_AVAILABILITY_UPDATED",
       req.user.email,
-      `Updated availability rule ${rule.id}`
+      `Updated availability rule ${rule.id}`,
     );
 
     return res.json({
       success: true,
       message: "Therapist availability updated successfully",
-      availability: sanitizeAvailability(rule)
+      availability: buildAvailabilityWithNames(db, rule),
     });
-  }
+  },
 );
 
 // ACTIVE / INACTIVE weekly availability
@@ -393,7 +707,7 @@ router.patch(
       return res.status(400).json({
         success: false,
         message: "Invalid status",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -406,7 +720,7 @@ router.patch(
     if (!rule) {
       return res.status(404).json({
         success: false,
-        message: "Availability rule not found"
+        message: "Availability rule not found",
       });
     }
 
@@ -418,15 +732,15 @@ router.patch(
     addAuditLog(
       "THERAPIST_AVAILABILITY_STATUS_UPDATED",
       req.user.email,
-      `Changed availability rule ${rule.id} status to ${rule.status}`
+      `Changed availability rule ${rule.id} status to ${rule.status}`,
     );
 
     return res.json({
       success: true,
       message: "Availability status updated successfully",
-      availability: sanitizeAvailability(rule)
+      availability: sanitizeAvailability(rule),
     });
-  }
+  },
 );
 
 // GET time off for therapist
@@ -442,14 +756,14 @@ router.get(
     if (!therapistProfile) {
       return res.status(404).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Therapist profile not found",
       });
     }
 
     if (!canTherapistAccessProfile(req, therapistProfile)) {
       return res.status(403).json({
         success: false,
-        message: "You can only view your own time off"
+        message: "You can only view your own time off",
       });
     }
 
@@ -464,9 +778,9 @@ router.get(
     return res.json({
       success: true,
       count: timeOff.length,
-      timeOff
+      timeOff,
     });
-  }
+  },
 );
 
 // CREATE time off / sick leave / blocked time
@@ -481,14 +795,16 @@ router.post(
       return res.status(400).json({
         success: false,
         message: "Invalid input",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
-    if (!validateDateTimeRange(result.data.startDateTime, result.data.endDateTime)) {
+    if (
+      !validateDateTimeRange(result.data.startDateTime, result.data.endDateTime)
+    ) {
       return res.status(400).json({
         success: false,
-        message: "End date/time must be after start date/time"
+        message: "End date/time must be after start date/time",
       });
     }
 
@@ -499,7 +815,7 @@ router.post(
     if (!therapistProfile) {
       return res.status(404).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Therapist profile not found",
       });
     }
 
@@ -515,7 +831,7 @@ router.post(
       notes: result.data.notes || "",
       status: "active",
       createdAt: now,
-      updatedAt: null
+      updatedAt: null,
     };
 
     db.therapistTimeOff.push(timeOffBlock);
@@ -524,15 +840,15 @@ router.post(
     addAuditLog(
       "THERAPIST_TIME_OFF_CREATED",
       req.user.email,
-      `Created ${result.data.type} block for therapist profile ${result.data.therapistId}`
+      `Created ${result.data.type} block for therapist profile ${result.data.therapistId}`,
     );
 
     return res.status(201).json({
       success: true,
       message: "Therapist time off created successfully",
-      timeOff: sanitizeTimeOff(timeOffBlock)
+      timeOff: sanitizeTimeOff(timeOffBlock),
     });
-  }
+  },
 );
 
 // UPDATE time off
@@ -547,7 +863,7 @@ router.patch(
       return res.status(400).json({
         success: false,
         message: "Invalid input",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -560,7 +876,7 @@ router.patch(
     if (!block) {
       return res.status(404).json({
         success: false,
-        message: "Time off block not found"
+        message: "Time off block not found",
       });
     }
 
@@ -570,7 +886,7 @@ router.patch(
     if (!validateDateTimeRange(newStartDateTime, newEndDateTime)) {
       return res.status(400).json({
         success: false,
-        message: "End date/time must be after start date/time"
+        message: "End date/time must be after start date/time",
       });
     }
 
@@ -579,7 +895,7 @@ router.patch(
       "endDateTime",
       "type",
       "reason",
-      "notes"
+      "notes",
     ];
 
     allowedFields.forEach(function (field) {
@@ -595,15 +911,15 @@ router.patch(
     addAuditLog(
       "THERAPIST_TIME_OFF_UPDATED",
       req.user.email,
-      `Updated time off block ${block.id}`
+      `Updated time off block ${block.id}`,
     );
 
     return res.json({
       success: true,
       message: "Therapist time off updated successfully",
-      timeOff: sanitizeTimeOff(block)
+      timeOff: sanitizeTimeOff(block),
     });
-  }
+  },
 );
 
 // ACTIVE / CANCELLED time off
@@ -618,7 +934,7 @@ router.patch(
       return res.status(400).json({
         success: false,
         message: "Invalid status",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -631,7 +947,7 @@ router.patch(
     if (!block) {
       return res.status(404).json({
         success: false,
-        message: "Time off block not found"
+        message: "Time off block not found",
       });
     }
 
@@ -643,15 +959,15 @@ router.patch(
     addAuditLog(
       "THERAPIST_TIME_OFF_STATUS_UPDATED",
       req.user.email,
-      `Changed time off block ${block.id} status to ${block.status}`
+      `Changed time off block ${block.id} status to ${block.status}`,
     );
 
     return res.json({
       success: true,
       message: "Time off status updated successfully",
-      timeOff: sanitizeTimeOff(block)
+      timeOff: sanitizeTimeOff(block),
     });
-  }
+  },
 );
 
 module.exports = router;

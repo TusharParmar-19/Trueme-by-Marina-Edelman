@@ -13,6 +13,16 @@ const router = express.Router();
 
 const APPOINTMENT_TYPES = ["telehealth", "in_person"];
 
+const DAY_NAMES = {
+  0: "Sunday",
+  1: "Monday",
+  2: "Tuesday",
+  3: "Wednesday",
+  4: "Thursday",
+  5: "Friday",
+  6: "Saturday",
+};
+
 const therapistProfileSchema = z.object({
   userId: z.string().min(1),
   title: z.string().max(120).optional(),
@@ -38,7 +48,70 @@ const updateProfileStatusSchema = z.object({
   profileStatus: z.enum(["active", "inactive", "hidden"])
 });
 
-function sanitizeTherapistProfile(profile, user) {
+function getTherapistListDetails(db, therapistId) {
+  const services = (db.therapistServices || [])
+    .filter(function (assignment) {
+      return (
+        assignment.therapistId === therapistId && assignment.status === "active"
+      );
+    })
+    .map(function (assignment) {
+      const service = (db.services || []).find(function (item) {
+        return item.id === assignment.serviceId;
+      });
+
+      return {
+        id: assignment.serviceId,
+        name: service ? service.name : assignment.serviceId,
+        locationIds: assignment.locationIds || [],
+        appointmentTypes: assignment.appointmentTypes || [],
+      };
+    });
+
+  const availability = (db.therapistAvailability || [])
+    .filter(function (rule) {
+      return (
+        rule.therapistId === therapistId &&
+        rule.status !== "inactive" &&
+        rule.status !== "archived"
+      );
+    })
+    .map(function (rule) {
+      const locationIds =
+        rule.locationIds || (rule.locationId ? [rule.locationId] : []);
+
+      const locations = locationIds.map(function (locationId) {
+        const location = (db.locations || []).find(function (item) {
+          return item.id === locationId;
+        });
+
+        return {
+          id: locationId,
+          name: location ? location.name : locationId,
+        };
+      });
+
+      return {
+        id: rule.id,
+        dayOfWeek: rule.dayOfWeek,
+        dayName: DAY_NAMES[rule.dayOfWeek],
+        startTime: rule.startTime,
+        endTime: rule.endTime,
+        locationIds,
+        locations,
+        appointmentTypes: rule.appointmentTypes || [],
+        status: rule.status,
+      };
+    });
+
+  return { services, availability };
+}
+
+function sanitizeTherapistProfile(profile, user, db) {
+  const details = db
+    ? getTherapistListDetails(db, profile.id)
+    : { services: [], availability: [] };
+
   return {
     id: profile.id,
     userId: profile.userId,
@@ -50,6 +123,8 @@ function sanitizeTherapistProfile(profile, user) {
     licenseNumber: profile.licenseNumber,
     bio: profile.bio,
     appointmentTypes: profile.appointmentTypes || [],
+    services: details.services,
+    availability: details.availability,
     focusAreas: profile.focusAreas || [],
     treatmentApproaches: profile.treatmentApproaches || [],
     clientFocus: profile.clientFocus || [],
@@ -58,7 +133,7 @@ function sanitizeTherapistProfile(profile, user) {
     isPublicBookingEnabled: profile.isPublicBookingEnabled || false,
     profileStatus: profile.profileStatus,
     createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt || null
+    updatedAt: profile.updatedAt || null,
   };
 }
 
@@ -75,7 +150,7 @@ router.get(
         return item.id === profile.userId;
       });
 
-      return sanitizeTherapistProfile(profile, user);
+      return sanitizeTherapistProfile(profile, user, db);
     });
 
     return res.json({
@@ -111,7 +186,7 @@ router.get(
 
     return res.json({
       success: true,
-      therapist: sanitizeTherapistProfile(profile, user)
+      therapist: sanitizeTherapistProfile(profile, user, db)
     });
   }
 );
@@ -221,7 +296,7 @@ router.get(
 
     return res.json({
       success: true,
-      therapist: sanitizeTherapistProfile(profile, user)
+      therapist: sanitizeTherapistProfile(profile, user, db)
     });
   }
 );

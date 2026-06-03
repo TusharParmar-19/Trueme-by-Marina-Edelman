@@ -5,6 +5,64 @@ import { apiRequest } from "../../api/apiClient";
 import DashboardLayout from "../../layouts/DashboardLayout";
 import { getUser } from "../../utils/auth";
 
+function getRoomDisplay(appointment) {
+  if (appointment.appointmentType === "telehealth") {
+    return "Online";
+  }
+
+  return (
+    appointment.roomName ||
+    appointment.room?.name ||
+    appointment.roomId ||
+    "Not assigned"
+  );
+}
+
+function getLocationType(location) {
+  if (!location) {
+    return "";
+  }
+
+  const rawType = location.locationType || location.type || "";
+  const normalizedType = String(rawType).toLowerCase();
+
+  if (normalizedType === "virtual") {
+    return "virtual";
+  }
+
+  if (normalizedType === "office") {
+    return "office";
+  }
+
+  const name = String(
+    location.name || location.locationName || "",
+  ).toLowerCase();
+
+  if (
+    name.includes("virtual") ||
+    name.includes("online") ||
+    name.includes("telehealth")
+  ) {
+    return "virtual";
+  }
+
+  return "office";
+}
+
+function getAppointmentTypeForLocation(location) {
+  const locationType = getLocationType(location);
+
+  if (locationType === "virtual") {
+    return "telehealth";
+  }
+
+  if (locationType === "office") {
+    return "in_person";
+  }
+
+  return "";
+}
+
 function AdminAppointments() {
   const navigate = useNavigate();
   const user = getUser();
@@ -215,12 +273,39 @@ const [rescheduleLoading, setRescheduleLoading] = useState(false);
   }
 
   function handleBookingChange(event) {
+    const { name, value } = event.target;
+
+    if (name === "locationId") {
+      const selectedLocation = locations.find((location) => {
+        return location.id === value;
+      });
+
+      const appointmentType = getAppointmentTypeForLocation(selectedLocation);
+
+      setBookingForm({
+        ...bookingForm,
+        locationId: value,
+        appointmentType,
+        slot: "",
+      });
+
+      setSlots([]);
+
+      return;
+    }
+
     setBookingForm({
       ...bookingForm,
-      [event.target.name]: event.target.value
+      [name]: value,
     });
 
-    setSlots([]);
+    if (
+      name === "serviceId" ||
+      name === "appointmentType" ||
+      name === "clientId"
+    ) {
+      setSlots([]);
+    }
   }
 
   function startReschedule(appointment) {
@@ -330,10 +415,10 @@ async function submitReschedule(event) {
 }, []);
 
   return (
-     <DashboardLayout
-    title="Appointments"
-    subtitle="View, book, and manage appointment bookings."
-  >
+    <DashboardLayout
+      title="Appointments"
+      subtitle="View, book, and manage appointment bookings."
+    >
       {/* <div className="dashboard-header">
         <div>
           <h1>Appointments</h1>
@@ -427,6 +512,7 @@ async function submitReschedule(event) {
                 name="appointmentType"
                 value={bookingForm.appointmentType}
                 onChange={handleBookingChange}
+                disabled
               >
                 <option value="telehealth">Telehealth</option>
                 <option value="in_person">In Person</option>
@@ -469,85 +555,89 @@ async function submitReschedule(event) {
       {loading ? <div className="card">Loading appointments...</div> : null}
 
       {rescheduleForm ? (
-  <div className="card">
-    <h2>Reschedule Appointment</h2>
+        <div className="card">
+          <h2>Reschedule Appointment</h2>
 
-    <p>
-      Rescheduling appointment for <strong>{rescheduleForm.clientName}</strong>.
-      Current slot: {rescheduleForm.currentDate} at{" "}
-      {rescheduleForm.currentStartTime}
-    </p>
+          <p>
+            Rescheduling appointment for{" "}
+            <strong>{rescheduleForm.clientName}</strong>. Current slot:{" "}
+            {rescheduleForm.currentDate} at {rescheduleForm.currentStartTime}
+          </p>
 
-    <form onSubmit={submitReschedule}>
-      <div className="form-grid">
-        <div>
-          <label>New Date</label>
-          <input
-            className="input"
-            type="date"
-            value={rescheduleForm.date}
-            onChange={(event) => {
-              setRescheduleForm({
-                ...rescheduleForm,
-                date: event.target.value,
-                startTime: ""
-              });
-              setRescheduleSlots([]);
-            }}
-          />
+          <form onSubmit={submitReschedule}>
+            <div className="form-grid">
+              <div>
+                <label>New Date</label>
+                <input
+                  className="input"
+                  type="date"
+                  value={rescheduleForm.date}
+                  onChange={(event) => {
+                    setRescheduleForm({
+                      ...rescheduleForm,
+                      date: event.target.value,
+                      startTime: "",
+                    });
+                    setRescheduleSlots([]);
+                  }}
+                />
+              </div>
+
+              <div>
+                <label>New Slot</label>
+                <select
+                  className="input"
+                  value={rescheduleForm.startTime}
+                  onChange={(event) =>
+                    setRescheduleForm({
+                      ...rescheduleForm,
+                      startTime: event.target.value,
+                    })
+                  }
+                >
+                  <option value="">Select slot</option>
+                  {rescheduleSlots.map((slot) => (
+                    <option key={slot.startTime} value={slot.startTime}>
+                      {slot.startTime} - {slot.endTime} (
+                      {slot.availableTherapistCount} therapist available)
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div className="form-actions">
+              <button
+                className="btn secondary"
+                type="button"
+                onClick={checkRescheduleSlots}
+                disabled={rescheduleLoading}
+              >
+                {rescheduleLoading ? "Checking..." : "Check New Slots"}
+              </button>
+
+              <button
+                className="btn"
+                type="submit"
+                disabled={rescheduleLoading}
+              >
+                {rescheduleLoading ? "Rescheduling..." : "Confirm Reschedule"}
+              </button>
+
+              <button
+                className="btn secondary"
+                type="button"
+                onClick={() => {
+                  setRescheduleForm(null);
+                  setRescheduleSlots([]);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
         </div>
-
-        <div>
-          <label>New Slot</label>
-          <select
-            className="input"
-            value={rescheduleForm.startTime}
-            onChange={(event) =>
-              setRescheduleForm({
-                ...rescheduleForm,
-                startTime: event.target.value
-              })
-            }
-          >
-            <option value="">Select slot</option>
-            {rescheduleSlots.map((slot) => (
-              <option key={slot.startTime} value={slot.startTime}>
-                {slot.startTime} - {slot.endTime} (
-                {slot.availableTherapistCount} therapist available)
-              </option>
-            ))}
-          </select>
-        </div>
-      </div>
-
-      <div className="form-actions">
-        <button
-          className="btn secondary"
-          type="button"
-          onClick={checkRescheduleSlots}
-          disabled={rescheduleLoading}
-        >
-          {rescheduleLoading ? "Checking..." : "Check New Slots"}
-        </button>
-
-        <button className="btn" type="submit" disabled={rescheduleLoading}>
-          {rescheduleLoading ? "Rescheduling..." : "Confirm Reschedule"}
-        </button>
-
-        <button
-          className="btn secondary"
-          type="button"
-          onClick={() => {
-            setRescheduleForm(null);
-            setRescheduleSlots([]);
-          }}
-        >
-          Cancel
-        </button>
-      </div>
-    </form>
-  </div>
-) : null}
+      ) : null}
 
       <div className="card">
         <h2>Appointments on {date}</h2>
@@ -563,6 +653,7 @@ async function submitReschedule(event) {
                 <th>Therapist</th>
                 <th>Service</th>
                 <th>Location</th>
+                <th>Room</th>
                 <th>Status</th>
                 <th>Actions</th>
               </tr>
@@ -584,6 +675,7 @@ async function submitReschedule(event) {
                   <td>{appointment.therapistName}</td>
                   <td>{appointment.serviceName}</td>
                   <td>{appointment.locationName}</td>
+                  <td>{getRoomDisplay(appointment)}</td>
 
                   <td>
                     <span className={`badge ${appointment.status}`}>
@@ -593,24 +685,24 @@ async function submitReschedule(event) {
 
                   <td>
                     {appointment.status === "confirmed" ? (
-  <div className="row-actions">
-    <button
-      className="btn secondary small-btn"
-      onClick={() => startReschedule(appointment)}
-    >
-      Reschedule
-    </button>
+                      <div className="row-actions">
+                        <button
+                          className="btn secondary small-btn"
+                          onClick={() => startReschedule(appointment)}
+                        >
+                          Reschedule
+                        </button>
 
-    <button
-      className="btn danger small-btn"
-      onClick={() => cancelAppointment(appointment.id)}
-    >
-      Cancel
-    </button>
-  </div>
-) : (
-  <span>-</span>
-)}
+                        <button
+                          className="btn danger small-btn"
+                          onClick={() => cancelAppointment(appointment.id)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    ) : (
+                      <span>-</span>
+                    )}
                   </td>
                 </tr>
               ))}

@@ -23,6 +23,8 @@ function DashboardLayout({ children, title, subtitle }) {
         { label: "Clients", path: "/admin/clients" },
         { label: "Services", path: "/admin/services" },
         { label: "Locations", path: "/admin/locations" },
+        { label: "Availability", path: "/admin/availability" },
+        { label: "Rooms", path: "/admin/rooms" },
       ];
     }
 
@@ -35,6 +37,8 @@ function DashboardLayout({ children, title, subtitle }) {
         { label: "Clients", path: "/manager/clients" },
         { label: "Services", path: "/manager/services" },
         { label: "Locations", path: "/manager/locations" },
+        { label: "Availability", path: "/manager/availability" },
+        { label: "Rooms", path: "/manager/rooms" },
       ];
     }
 

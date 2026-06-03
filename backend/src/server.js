@@ -14,6 +14,7 @@ const therapistServiceRoutes = require("./modules/therapistServices/therapistSer
 const appointmentsRoutes = require("./modules/appointments/appointments.routes");
 const waitlistRoutes = require("./modules/waitlist/waitlist.routes");
 const dashboardRoutes = require("./modules/dashboard/dashboard.routes");
+const roomsRoutes = require("./modules/rooms/rooms.routes");
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.use("/api/therapist-services", therapistServiceRoutes);
 app.use("/api/appointments", appointmentsRoutes);
 app.use("/api/waitlist", waitlistRoutes);
 app.use("/api/dashboard", dashboardRoutes);
+app.use("/api/rooms", roomsRoutes);
 
 app.get("/", function (req, res) {
   res.json({

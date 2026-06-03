@@ -11,6 +11,8 @@ import AdminTherapists from "./pages/admin/AdminTherapists";
 import AdminClients from "./pages/admin/AdminClients";
 import AdminServices from "./pages/admin/AdminServices";
 import AdminLocations from "./pages/admin/AdminLocations";
+import AdminAvailability from "./pages/admin/AdminAvailability";
+import AdminRooms from "./pages/admin/AdminRooms";
 
 import { getUser, isLoggedIn, hasRole } from "./utils/auth";
 
@@ -108,10 +110,28 @@ function App() {
       />
 
       <Route
+        path="/admin/rooms"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminRooms />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
         path="/manager"
         element={
           <ProtectedRoute roles={["office_manager"]}>
             <ManagerDashboard />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/admin/availability"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminAvailability />
           </ProtectedRoute>
         }
       />
@@ -166,6 +186,24 @@ function App() {
         element={
           <ProtectedRoute roles={["office_manager"]}>
             <AdminLocations />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/availability"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminAvailability />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/manager/rooms"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <AdminRooms />
           </ProtectedRoute>
         }
       />

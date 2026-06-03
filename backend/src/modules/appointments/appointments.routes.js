@@ -4,7 +4,7 @@ const { z } = require("zod");
 const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
 const {
   authMiddleware,
-  allowRoles
+  allowRoles,
 } = require("../../middleware/authMiddleware");
 
 const { USER_ROLES } = require("../users/user.roles");
@@ -29,7 +29,7 @@ const slotQuerySchema = z.object({
     .optional()
     .transform(function (value) {
       return value ? Number(value) : 30;
-    })
+    }),
 });
 
 const createAppointmentSchema = z.object({
@@ -40,12 +40,12 @@ const createAppointmentSchema = z.object({
   date: z.string().regex(DATE_REGEX, "Use YYYY-MM-DD format"),
   startTime: z.string().regex(TIME_REGEX, "Use HH:MM format"),
   therapistId: z.string().optional(),
-  notes: z.string().max(1000).optional()
+  notes: z.string().max(1000).optional(),
 });
 
 const updateAppointmentStatusSchema = z.object({
   status: z.enum(["confirmed", "cancelled", "completed", "no_show"]),
-  reason: z.string().max(500).optional()
+  reason: z.string().max(500).optional(),
 });
 
 const rescheduleAppointmentSchema = z.object({
@@ -53,7 +53,7 @@ const rescheduleAppointmentSchema = z.object({
   startTime: z.string().regex(TIME_REGEX, "Use HH:MM format"),
   therapistId: z.string().optional(),
   allowDifferentTherapist: z.boolean().optional(),
-  notes: z.string().max(1000).optional()
+  notes: z.string().max(1000).optional(),
 });
 
 function timeToMinutes(time) {
@@ -107,6 +107,10 @@ function sanitizeAppointment(appointment, db) {
     return item.id === appointment.locationId;
   });
 
+  const room = (db.rooms || []).find(function (item) {
+    return item.id === appointment.roomId;
+  });
+
   return {
     id: appointment.id,
     clientId: appointment.clientId,
@@ -118,6 +122,8 @@ function sanitizeAppointment(appointment, db) {
     serviceName: service ? service.name : null,
     locationId: appointment.locationId,
     locationName: location ? location.name : null,
+    roomId: appointment.roomId || null,
+    roomName: room ? room.name : null,
     appointmentType: appointment.appointmentType,
     date: appointment.date,
     startTime: appointment.startTime,
@@ -130,7 +136,7 @@ function sanitizeAppointment(appointment, db) {
     notes: appointment.notes || "",
     createdBy: appointment.createdBy,
     createdAt: appointment.createdAt,
-    updatedAt: appointment.updatedAt || null
+    updatedAt: appointment.updatedAt || null,
   };
 }
 
@@ -163,7 +169,7 @@ function sanitizeWaitlistEntry(entry, db) {
     status: entry.status,
     notes: entry.notes || "",
     createdAt: entry.createdAt,
-    updatedAt: entry.updatedAt || null
+    updatedAt: entry.updatedAt || null,
   };
 }
 
@@ -241,7 +247,13 @@ function matchesOptionalList(list, value) {
   return list.includes(value);
 }
 
-function getEligibleTherapists(db, serviceId, locationId, appointmentType, specificTherapistId) {
+function getEligibleTherapists(
+  db,
+  serviceId,
+  locationId,
+  appointmentType,
+  specificTherapistId,
+) {
   const assignments = db.therapistServices.filter(function (assignment) {
     return (
       assignment.serviceId === serviceId &&
@@ -255,8 +267,8 @@ function getEligibleTherapists(db, serviceId, locationId, appointmentType, speci
     new Set(
       assignments.map(function (assignment) {
         return assignment.therapistId;
-      })
-    )
+      }),
+    ),
   );
 
   return therapistIds
@@ -312,7 +324,7 @@ function computeAppointmentTimes(service, startTime) {
     blockedEndMinutes,
     endTime: minutesToTime(endMinutes),
     blockedStartTime: minutesToTime(blockedStartMinutes),
-    blockedEndTime: minutesToTime(blockedEndMinutes)
+    blockedEndTime: minutesToTime(blockedEndMinutes),
   };
 }
 
@@ -323,7 +335,7 @@ function therapistHasWeeklyAvailability(
   service,
   startTime,
   locationId,
-  appointmentType
+  appointmentType,
 ) {
   const dayOfWeek = getDayOfWeek(date);
   const times = computeAppointmentTimes(service, startTime);
@@ -338,7 +350,8 @@ function therapistHasWeeklyAvailability(
     if (rule.dayOfWeek !== dayOfWeek) return false;
 
     if (!matchesOptionalList(rule.locationIds, locationId)) return false;
-    if (!matchesOptionalList(rule.appointmentTypes, appointmentType)) return false;
+    if (!matchesOptionalList(rule.appointmentTypes, appointmentType))
+      return false;
 
     const ruleStart = timeToMinutes(rule.startTime);
     const ruleEnd = timeToMinutes(rule.endTime);
@@ -354,11 +367,11 @@ function therapistHasTimeOff(db, therapistId, date, service, startTime) {
   const times = computeAppointmentTimes(service, startTime);
 
   const slotStartDateTime = new Date(
-    createDateTime(date, times.blockedStartTime)
+    createDateTime(date, times.blockedStartTime),
   ).getTime();
 
   const slotEndDateTime = new Date(
-    createDateTime(date, times.blockedEndTime)
+    createDateTime(date, times.blockedEndTime),
   ).getTime();
 
   return db.therapistTimeOff.some(function (block) {
@@ -372,7 +385,13 @@ function therapistHasTimeOff(db, therapistId, date, service, startTime) {
   });
 }
 
-function therapistHasAppointmentConflict(db, therapistId, date, service, startTime) {
+function therapistHasAppointmentConflict(
+  db,
+  therapistId,
+  date,
+  service,
+  startTime,
+) {
   const times = computeAppointmentTimes(service, startTime);
 
   return db.appointments.some(function (appointment) {
@@ -381,18 +400,18 @@ function therapistHasAppointmentConflict(db, therapistId, date, service, startTi
     if (["cancelled", "no_show"].includes(appointment.status)) return false;
 
     const existingStart = timeToMinutes(
-      appointment.blockedStartTime || appointment.startTime
+      appointment.blockedStartTime || appointment.startTime,
     );
 
     const existingEnd = timeToMinutes(
-      appointment.blockedEndTime || appointment.endTime
+      appointment.blockedEndTime || appointment.endTime,
     );
 
     return rangesOverlap(
       times.blockedStartMinutes,
       times.blockedEndMinutes,
       existingStart,
-      existingEnd
+      existingEnd,
     );
   });
 }
@@ -404,7 +423,7 @@ function isTherapistAvailableForSlot(
   service,
   locationId,
   appointmentType,
-  startTime
+  startTime,
 ) {
   const hasWeeklyAvailability = therapistHasWeeklyAvailability(
     db,
@@ -413,7 +432,7 @@ function isTherapistAvailableForSlot(
     service,
     startTime,
     locationId,
-    appointmentType
+    appointmentType,
   );
 
   if (!hasWeeklyAvailability) return false;
@@ -423,7 +442,7 @@ function isTherapistAvailableForSlot(
     therapistId,
     date,
     service,
-    startTime
+    startTime,
   );
 
   if (hasTimeOff) return false;
@@ -433,7 +452,7 @@ function isTherapistAvailableForSlot(
     therapistId,
     date,
     service,
-    startTime
+    startTime,
   );
 
   if (hasConflict) return false;
@@ -462,6 +481,49 @@ function chooseTherapist(db, availableTherapists, date) {
   return sorted[0];
 }
 
+function getActiveRoomsForLocation(db, locationId) {
+  return (db.rooms || []).filter(function (room) {
+    return room.locationId === locationId && room.status === "active";
+  });
+}
+
+function roomHasAppointmentConflict(db, roomId, date, service, startTime) {
+  const times = computeAppointmentTimes(service, startTime);
+
+  return (db.appointments || []).some(function (appointment) {
+    if (appointment.roomId !== roomId) return false;
+    if (appointment.date !== date) return false;
+    if (["cancelled", "no_show"].includes(appointment.status)) return false;
+
+    const existingStart = timeToMinutes(
+      appointment.blockedStartTime || appointment.startTime,
+    );
+
+    const existingEnd = timeToMinutes(
+      appointment.blockedEndTime || appointment.endTime,
+    );
+
+    return rangesOverlap(
+      times.blockedStartMinutes,
+      times.blockedEndMinutes,
+      existingStart,
+      existingEnd,
+    );
+  });
+}
+
+function getAvailableRoomsForSlot(db, locationId, date, service, startTime) {
+  const activeRooms = getActiveRoomsForLocation(db, locationId);
+
+  return activeRooms.filter(function (room) {
+    return !roomHasAppointmentConflict(db, room.id, date, service, startTime);
+  });
+}
+
+function chooseRoom(availableRooms) {
+  return availableRooms[0];
+}
+
 function buildAvailableSlots(db, options) {
   const service = getActiveService(db, options.serviceId);
   const location = getActiveLocation(db, options.locationId);
@@ -475,7 +537,7 @@ function buildAvailableSlots(db, options) {
     options.serviceId,
     options.locationId,
     options.appointmentType,
-    options.therapistId
+    options.therapistId,
   );
 
   const slotMap = new Map();
@@ -517,7 +579,7 @@ function buildAvailableSlots(db, options) {
           service,
           options.locationId,
           options.appointmentType,
-          startTime
+          startTime,
         );
 
         if (!isAvailable) continue;
@@ -534,7 +596,7 @@ function buildAvailableSlots(db, options) {
             locationId: location.id,
             locationName: location.name,
             appointmentType: options.appointmentType,
-            availableTherapistIds: []
+            availableTherapistIds: [],
           });
         }
 
@@ -545,6 +607,38 @@ function buildAvailableSlots(db, options) {
 
   return Array.from(slotMap.values())
     .map(function (slot) {
+      let availableRooms = [];
+
+      if (slot.appointmentType === "in_person") {
+        availableRooms = getAvailableRoomsForSlot(
+          db,
+          slot.locationId,
+          slot.date,
+          service,
+          slot.startTime,
+        );
+
+        if (availableRooms.length === 0) {
+          return null;
+        }
+      }
+
+      const availableRoomIds = availableRooms.map(function (room) {
+        return room.id;
+      });
+
+      const availableRoomCount =
+        slot.appointmentType === "in_person" ? availableRooms.length : null;
+
+      const maxBookableCount =
+        slot.appointmentType === "in_person"
+          ? Math.min(slot.availableTherapistIds.length, availableRooms.length)
+          : slot.availableTherapistIds.length;
+
+      if (maxBookableCount <= 0) {
+        return null;
+      }
+
       return {
         date: slot.date,
         startTime: slot.startTime,
@@ -555,9 +649,13 @@ function buildAvailableSlots(db, options) {
         locationName: slot.locationName,
         appointmentType: slot.appointmentType,
         availableTherapistCount: slot.availableTherapistIds.length,
-        availableTherapistIds: slot.availableTherapistIds
+        availableTherapistIds: slot.availableTherapistIds,
+        availableRoomCount,
+        availableRoomIds,
+        maxBookableCount,
       };
     })
+    .filter(Boolean)
     .sort(function (a, b) {
       return timeToMinutes(a.startTime) - timeToMinutes(b.startTime);
     });
@@ -567,11 +665,7 @@ function buildAvailableSlots(db, options) {
 router.get(
   "/slots",
   authMiddleware,
-  allowRoles(
-    USER_ROLES.ADMIN,
-    USER_ROLES.OFFICE_MANAGER,
-    USER_ROLES.CLIENT
-  ),
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
   function (req, res) {
     const result = slotQuerySchema.safeParse(req.query);
 
@@ -579,7 +673,7 @@ router.get(
       return res.status(400).json({
         success: false,
         message: "Invalid query",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -589,7 +683,7 @@ router.get(
     if (!service) {
       return res.status(404).json({
         success: false,
-        message: "Active service not found"
+        message: "Active service not found",
       });
     }
 
@@ -597,7 +691,7 @@ router.get(
     if (!location) {
       return res.status(404).json({
         success: false,
-        message: "Active location not found"
+        message: "Active location not found",
       });
     }
 
@@ -606,20 +700,16 @@ router.get(
     return res.json({
       success: true,
       count: slots.length,
-      slots
+      slots,
     });
-  }
+  },
 );
 
 // CREATE appointment
 router.post(
   "/",
   authMiddleware,
-  allowRoles(
-    USER_ROLES.ADMIN,
-    USER_ROLES.OFFICE_MANAGER,
-    USER_ROLES.CLIENT
-  ),
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
   function (req, res) {
     const result = createAppointmentSchema.safeParse(req.body);
 
@@ -627,7 +717,7 @@ router.post(
       return res.status(400).json({
         success: false,
         message: "Invalid input",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -637,7 +727,7 @@ router.post(
     if (!service) {
       return res.status(404).json({
         success: false,
-        message: "Active service not found"
+        message: "Active service not found",
       });
     }
 
@@ -645,7 +735,7 @@ router.post(
     if (!location) {
       return res.status(404).json({
         success: false,
-        message: "Active location not found"
+        message: "Active location not found",
       });
     }
 
@@ -658,7 +748,7 @@ router.post(
     if (!clientId) {
       return res.status(400).json({
         success: false,
-        message: "clientId is required for admin or office manager booking"
+        message: "clientId is required for admin or office manager booking",
       });
     }
 
@@ -667,7 +757,7 @@ router.post(
     if (!client) {
       return res.status(404).json({
         success: false,
-        message: "Active client user not found"
+        message: "Active client user not found",
       });
     }
 
@@ -676,7 +766,7 @@ router.post(
       result.data.serviceId,
       result.data.locationId,
       result.data.appointmentType,
-      result.data.therapistId
+      result.data.therapistId,
     );
 
     const availableTherapists = eligibleTherapists.filter(function (therapist) {
@@ -687,14 +777,14 @@ router.post(
         service,
         result.data.locationId,
         result.data.appointmentType,
-        result.data.startTime
+        result.data.startTime,
       );
     });
 
     if (!availableTherapists.length) {
       return res.status(409).json({
         success: false,
-        message: "No therapist available for this slot"
+        message: "No therapist available for this slot",
       });
     }
 
@@ -702,9 +792,30 @@ router.post(
       ? availableTherapists[0]
       : chooseTherapist(db, availableTherapists, result.data.date);
 
+    let assignedRoom = null;
+
+    if (result.data.appointmentType === "in_person") {
+      const availableRooms = getAvailableRoomsForSlot(
+        db,
+        result.data.locationId,
+        result.data.date,
+        service,
+        result.data.startTime,
+      );
+
+      if (!availableRooms.length) {
+        return res.status(409).json({
+          success: false,
+          message: "No room available for this slot",
+        });
+      }
+
+      assignedRoom = chooseRoom(availableRooms);
+    }
+
     const appointmentTimes = computeAppointmentTimes(
       service,
-      result.data.startTime
+      result.data.startTime,
     );
 
     const now = new Date().toISOString();
@@ -715,6 +826,7 @@ router.post(
       therapistId: assignedTherapist.id,
       serviceId: service.id,
       locationId: location.id,
+      roomId: assignedRoom ? assignedRoom.id : null,
       appointmentType: result.data.appointmentType,
       date: result.data.date,
       startTime: result.data.startTime,
@@ -729,7 +841,7 @@ router.post(
       notes: result.data.notes || "",
       createdBy: req.user.email,
       createdAt: now,
-      updatedAt: null
+      updatedAt: null,
     };
 
     db.appointments.push(appointment);
@@ -738,15 +850,15 @@ router.post(
     addAuditLog(
       "APPOINTMENT_CREATED",
       req.user.email,
-      `Appointment booked for client ${client.email} with therapist profile ${assignedTherapist.id}`
+      `Appointment booked for client ${client.email} with therapist profile ${assignedTherapist.id}`,
     );
 
     return res.status(201).json({
       success: true,
       message: "Appointment booked successfully",
-      appointment: sanitizeAppointment(appointment, db)
+      appointment: sanitizeAppointment(appointment, db),
     });
-  }
+  },
 );
 
 // GET all appointments for admin / office manager
@@ -784,9 +896,9 @@ router.get(
     return res.json({
       success: true,
       count: result.length,
-      appointments: result
+      appointments: result,
     });
-  }
+  },
 );
 
 // GET my appointments
@@ -813,7 +925,7 @@ router.get(
       if (!therapistProfile) {
         return res.status(404).json({
           success: false,
-          message: "Therapist profile not found"
+          message: "Therapist profile not found",
         });
       }
 
@@ -829,9 +941,129 @@ router.get(
     return res.json({
       success: true,
       count: result.length,
-      appointments: result
+      appointments: result,
     });
-  }
+  },
+);
+
+router.get(
+  "/debug-slots",
+  authMiddleware,
+  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
+  function (req, res) {
+    const db = loadDB();
+
+    const date = req.query.date;
+    const serviceId = req.query.serviceId;
+    const locationId = req.query.locationId;
+    const appointmentType = req.query.appointmentType;
+
+    const service = (db.services || []).find(function (item) {
+      return item.id === serviceId;
+    });
+
+    const location = (db.locations || []).find(function (item) {
+      return item.id === locationId;
+    });
+
+    const rooms = (db.rooms || []).filter(function (room) {
+      return room.locationId === locationId;
+    });
+
+    const activeRooms = rooms.filter(function (room) {
+      return room.status === "active";
+    });
+
+    const therapistAssignments = (db.therapistServices || []).filter(
+      function (assignment) {
+        return (
+          assignment.serviceId === serviceId &&
+          assignment.status === "active" &&
+          (assignment.locationIds || []).includes(locationId) &&
+          (assignment.appointmentTypes || []).includes(appointmentType)
+        );
+      },
+    );
+
+    const therapistIdsFromAssignments = therapistAssignments.map(
+      function (assignment) {
+        return assignment.therapistId;
+      },
+    );
+
+    const therapists = (db.therapists || []).filter(function (therapist) {
+      return therapistIdsFromAssignments.includes(therapist.id);
+    });
+
+    const jsDate = new Date(date + "T00:00:00");
+    const dayOfWeek = jsDate.getDay();
+
+    const weeklyAvailability = (
+      db.weeklyAvailability ||
+      db.availability ||
+      db.therapistAvailability ||
+      []
+    ).filter(function (availability) {
+      return (
+        therapistIdsFromAssignments.includes(availability.therapistId) &&
+        Number(availability.dayOfWeek) === dayOfWeek &&
+        availability.status === "active"
+      );
+    });
+
+    const matchingAvailabilityForLocationAndType = weeklyAvailability.filter(
+      function (availability) {
+        const locationMatches =
+          availability.locationId === locationId ||
+          (availability.locationIds || []).includes(locationId);
+
+        const typeMatches =
+          !availability.appointmentTypes ||
+          availability.appointmentTypes.length === 0 ||
+          availability.appointmentTypes.includes(appointmentType);
+
+        return locationMatches && typeMatches;
+      },
+    );
+
+    return res.json({
+      success: true,
+      request: {
+        date,
+        dayOfWeek,
+        serviceId,
+        locationId,
+        appointmentType,
+      },
+      checks: {
+        serviceFound: Boolean(service),
+        serviceStatus: service ? service.status : null,
+        serviceAppointmentTypes: service ? service.appointmentTypes : null,
+
+        locationFound: Boolean(location),
+        locationName: location ? location.name : null,
+        locationStatus: location ? location.status : null,
+        locationType: location ? location.locationType : null,
+
+        totalRoomsForLocation: rooms.length,
+        activeRoomsForLocation: activeRooms.length,
+        rooms,
+
+        matchingTherapistAssignments: therapistAssignments.length,
+        therapistAssignments,
+
+        matchingTherapists: therapists.length,
+        therapists,
+
+        weeklyAvailabilityForDay: weeklyAvailability.length,
+        weeklyAvailability,
+
+        matchingAvailabilityForLocationAndType:
+          matchingAvailabilityForLocationAndType.length,
+        matchingAvailabilityForLocationAndType,
+      },
+    });
+  },
 );
 
 // GET single appointment by id
@@ -842,7 +1074,7 @@ router.get(
     USER_ROLES.ADMIN,
     USER_ROLES.OFFICE_MANAGER,
     USER_ROLES.CLIENT,
-    USER_ROLES.THERAPIST
+    USER_ROLES.THERAPIST,
   ),
   function (req, res) {
     const db = loadDB();
@@ -854,7 +1086,7 @@ router.get(
     if (!appointment) {
       return res.status(404).json({
         success: false,
-        message: "Appointment not found"
+        message: "Appointment not found",
       });
     }
 
@@ -864,7 +1096,7 @@ router.get(
     ) {
       return res.status(403).json({
         success: false,
-        message: "You can only view your own appointment"
+        message: "You can only view your own appointment",
       });
     }
 
@@ -873,10 +1105,13 @@ router.get(
         return therapist.userId === req.user.id;
       });
 
-      if (!therapistProfile || appointment.therapistId !== therapistProfile.id) {
+      if (
+        !therapistProfile ||
+        appointment.therapistId !== therapistProfile.id
+      ) {
         return res.status(403).json({
           success: false,
-          message: "You can only view your own therapist appointments"
+          message: "You can only view your own therapist appointments",
         });
       }
     }
@@ -884,9 +1119,9 @@ router.get(
     return res.json({
       success: true,
       appointment: sanitizeAppointment(appointment, db),
-      rescheduleHistory: appointment.rescheduleHistory || []
+      rescheduleHistory: appointment.rescheduleHistory || [],
     });
-  }
+  },
 );
 
 // RESCHEDULE appointment
@@ -901,7 +1136,7 @@ router.patch(
       return res.status(400).json({
         success: false,
         message: "Invalid reschedule input",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -914,7 +1149,7 @@ router.patch(
     if (!appointment) {
       return res.status(404).json({
         success: false,
-        message: "Appointment not found"
+        message: "Appointment not found",
       });
     }
 
@@ -924,14 +1159,14 @@ router.patch(
     ) {
       return res.status(403).json({
         success: false,
-        message: "You can only reschedule your own appointment"
+        message: "You can only reschedule your own appointment",
       });
     }
 
     if (["cancelled", "completed", "no_show"].includes(appointment.status)) {
       return res.status(400).json({
         success: false,
-        message: "Only confirmed appointments can be rescheduled"
+        message: "Only confirmed appointments can be rescheduled",
       });
     }
 
@@ -940,7 +1175,7 @@ router.patch(
     if (!service) {
       return res.status(404).json({
         success: false,
-        message: "Active service not found"
+        message: "Active service not found",
       });
     }
 
@@ -949,7 +1184,7 @@ router.patch(
     if (!location) {
       return res.status(404).json({
         success: false,
-        message: "Active location not found"
+        message: "Active location not found",
       });
     }
 
@@ -960,7 +1195,7 @@ router.patch(
       ...db,
       appointments: db.appointments.filter(function (item) {
         return item.id !== appointment.id;
-      })
+      }),
     };
 
     const allowDifferentTherapist =
@@ -975,27 +1210,27 @@ router.patch(
         appointment.serviceId,
         appointment.locationId,
         appointment.appointmentType,
-        result.data.therapistId
+        result.data.therapistId,
       );
 
-      const availableTherapists = eligibleTherapists.filter(function (
-        therapist
-      ) {
-        return isTherapistAvailableForSlot(
-          tempDb,
-          therapist.id,
-          result.data.date,
-          service,
-          appointment.locationId,
-          appointment.appointmentType,
-          result.data.startTime
-        );
-      });
+      const availableTherapists = eligibleTherapists.filter(
+        function (therapist) {
+          return isTherapistAvailableForSlot(
+            tempDb,
+            therapist.id,
+            result.data.date,
+            service,
+            appointment.locationId,
+            appointment.appointmentType,
+            result.data.startTime,
+          );
+        },
+      );
 
       if (!availableTherapists.length) {
         return res.status(409).json({
           success: false,
-          message: "Selected therapist is not available for this new slot"
+          message: "Selected therapist is not available for this new slot",
         });
       }
 
@@ -1009,22 +1244,22 @@ router.patch(
         appointment.serviceId,
         appointment.locationId,
         appointment.appointmentType,
-        appointment.therapistId
+        appointment.therapistId,
       );
 
-      const currentTherapistAvailable = currentTherapistEligible.find(function (
-        therapist
-      ) {
-        return isTherapistAvailableForSlot(
-          tempDb,
-          therapist.id,
-          result.data.date,
-          service,
-          appointment.locationId,
-          appointment.appointmentType,
-          result.data.startTime
-        );
-      });
+      const currentTherapistAvailable = currentTherapistEligible.find(
+        function (therapist) {
+          return isTherapistAvailableForSlot(
+            tempDb,
+            therapist.id,
+            result.data.date,
+            service,
+            appointment.locationId,
+            appointment.appointmentType,
+            result.data.startTime,
+          );
+        },
+      );
 
       if (currentTherapistAvailable) {
         assignedTherapist = currentTherapistAvailable;
@@ -1037,28 +1272,28 @@ router.patch(
         tempDb,
         appointment.serviceId,
         appointment.locationId,
-        appointment.appointmentType
+        appointment.appointmentType,
       );
 
-      const availableTherapists = eligibleTherapists.filter(function (
-        therapist
-      ) {
-        return isTherapistAvailableForSlot(
-          tempDb,
-          therapist.id,
-          result.data.date,
-          service,
-          appointment.locationId,
-          appointment.appointmentType,
-          result.data.startTime
-        );
-      });
+      const availableTherapists = eligibleTherapists.filter(
+        function (therapist) {
+          return isTherapistAvailableForSlot(
+            tempDb,
+            therapist.id,
+            result.data.date,
+            service,
+            appointment.locationId,
+            appointment.appointmentType,
+            result.data.startTime,
+          );
+        },
+      );
 
       if (availableTherapists.length) {
         assignedTherapist = chooseTherapist(
           tempDb,
           availableTherapists,
-          result.data.date
+          result.data.date,
         );
       }
     }
@@ -1066,23 +1301,45 @@ router.patch(
     if (!assignedTherapist) {
       return res.status(409).json({
         success: false,
-        message: "No therapist available for the new slot"
+        message: "No therapist available for the new slot",
       });
     }
 
     const oldSchedule = {
-  therapistId: appointment.therapistId,
-  serviceId: appointment.serviceId,
-  locationId: appointment.locationId,
-  appointmentType: appointment.appointmentType,
-  date: appointment.date,
-  startTime: appointment.startTime,
-  endTime: appointment.endTime
-};
+      therapistId: appointment.therapistId,
+      roomId: appointment.roomId || null,
+      serviceId: appointment.serviceId,
+      locationId: appointment.locationId,
+      appointmentType: appointment.appointmentType,
+      date: appointment.date,
+      startTime: appointment.startTime,
+      endTime: appointment.endTime,
+    };
+
+    let assignedRoom = null;
+
+    if (appointment.appointmentType === "in_person") {
+      const availableRooms = getAvailableRoomsForSlot(
+        tempDb,
+        appointment.locationId,
+        result.data.date,
+        service,
+        result.data.startTime,
+      );
+
+      if (!availableRooms.length) {
+        return res.status(409).json({
+          success: false,
+          message: "No room available for the new slot",
+        });
+      }
+
+      assignedRoom = chooseRoom(availableRooms);
+    }
 
     const appointmentTimes = computeAppointmentTimes(
       service,
-      result.data.startTime
+      result.data.startTime,
     );
 
     if (!appointment.rescheduleHistory) {
@@ -1092,10 +1349,11 @@ router.patch(
     appointment.rescheduleHistory.push({
       oldSchedule,
       changedBy: req.user.email,
-      changedAt: new Date().toISOString()
+      changedAt: new Date().toISOString(),
     });
 
     appointment.therapistId = assignedTherapist.id;
+    appointment.roomId = assignedRoom ? assignedRoom.id : null;
     appointment.date = result.data.date;
     appointment.startTime = result.data.startTime;
     appointment.endTime = appointmentTimes.endTime;
@@ -1103,11 +1361,11 @@ router.patch(
     appointment.blockedEndTime = appointmentTimes.blockedEndTime;
     appointment.startDateTime = createDateTime(
       result.data.date,
-      result.data.startTime
+      result.data.startTime,
     );
     appointment.endDateTime = createDateTime(
       result.data.date,
-      appointmentTimes.endTime
+      appointmentTimes.endTime,
     );
     appointment.status = "confirmed";
     appointment.updatedAt = new Date().toISOString();
@@ -1121,20 +1379,20 @@ router.patch(
     addAuditLog(
       "APPOINTMENT_RESCHEDULED",
       req.user.email,
-      `Appointment ${appointment.id} rescheduled from ${oldSchedule.date} ${oldSchedule.startTime} to ${appointment.date} ${appointment.startTime}`
+      `Appointment ${appointment.id} rescheduled from ${oldSchedule.date} ${oldSchedule.startTime} to ${appointment.date} ${appointment.startTime}`,
     );
 
     const matchingWaitlist = getMatchingWaitlistForSlot(db, oldSchedule);
 
-return res.json({
-  success: true,
-  message: "Appointment rescheduled successfully",
-  appointment: sanitizeAppointment(appointment, db),
-  oldSchedule,
-  matchingWaitlistCount: matchingWaitlist.length,
-  matchingWaitlist
-});
-  }
+    return res.json({
+      success: true,
+      message: "Appointment rescheduled successfully",
+      appointment: sanitizeAppointment(appointment, db),
+      oldSchedule,
+      matchingWaitlistCount: matchingWaitlist.length,
+      matchingWaitlist,
+    });
+  },
 );
 
 // UPDATE appointment status
@@ -1149,7 +1407,7 @@ router.patch(
       return res.status(400).json({
         success: false,
         message: "Invalid status",
-        errors: result.error.flatten()
+        errors: result.error.flatten(),
       });
     }
 
@@ -1162,7 +1420,7 @@ router.patch(
     if (!appointment) {
       return res.status(404).json({
         success: false,
-        message: "Appointment not found"
+        message: "Appointment not found",
       });
     }
 
@@ -1172,7 +1430,7 @@ router.patch(
     ) {
       return res.status(403).json({
         success: false,
-        message: "You can only update your own appointment"
+        message: "You can only update your own appointment",
       });
     }
 
@@ -1182,17 +1440,17 @@ router.patch(
     ) {
       return res.status(403).json({
         success: false,
-        message: "Client can only cancel appointment from this endpoint"
+        message: "Client can only cancel appointment from this endpoint",
       });
     }
 
     const oldSlot = {
-  serviceId: appointment.serviceId,
-  locationId: appointment.locationId,
-  appointmentType: appointment.appointmentType,
-  date: appointment.date,
-  startTime: appointment.startTime
-};
+      serviceId: appointment.serviceId,
+      locationId: appointment.locationId,
+      appointmentType: appointment.appointmentType,
+      date: appointment.date,
+      startTime: appointment.startTime,
+    };
 
     appointment.status = result.data.status;
     appointment.statusReason = result.data.reason || "";
@@ -1203,23 +1461,23 @@ router.patch(
     addAuditLog(
       "APPOINTMENT_STATUS_UPDATED",
       req.user.email,
-      `Appointment ${appointment.id} status changed to ${appointment.status}`
+      `Appointment ${appointment.id} status changed to ${appointment.status}`,
     );
 
-   let matchingWaitlist = [];
+    let matchingWaitlist = [];
 
-if (result.data.status === "cancelled") {
-  matchingWaitlist = getMatchingWaitlistForSlot(db, oldSlot);
-}
+    if (result.data.status === "cancelled") {
+      matchingWaitlist = getMatchingWaitlistForSlot(db, oldSlot);
+    }
 
-return res.json({
-  success: true,
-  message: "Appointment status updated successfully",
-  appointment: sanitizeAppointment(appointment, db),
-  matchingWaitlistCount: matchingWaitlist.length,
-  matchingWaitlist
-});
-  }
+    return res.json({
+      success: true,
+      message: "Appointment status updated successfully",
+      appointment: sanitizeAppointment(appointment, db),
+      matchingWaitlistCount: matchingWaitlist.length,
+      matchingWaitlist,
+    });
+  },
 );
 
 module.exports = router;

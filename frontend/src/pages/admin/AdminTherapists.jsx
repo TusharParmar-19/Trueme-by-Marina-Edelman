@@ -30,14 +30,57 @@ function getTherapistName(therapist) {
   );
 }
 
+function getServiceNames(therapist) {
+  return (therapist.services || therapist.therapyServices || [])
+    .map((service) => {
+      if (typeof service === "string") return service;
+      return service.name || service.serviceName || service.serviceId || "";
+    })
+    .filter(Boolean);
+}
+
+function getAvailabilityRows(therapist) {
+  return (therapist.availability || []).map((rule) => {
+    const dayName =
+      rule.dayName ||
+      DAYS.find((day) => day.value === Number(rule.dayOfWeek))?.label ||
+      `Day ${rule.dayOfWeek}`;
+
+    const locationNames = (rule.locations || [])
+      .map((location) => location.name || location.locationName || location.id)
+      .filter(Boolean);
+
+    const locationText = locationNames.length
+      ? locationNames.join(", ")
+      : "No location";
+
+    return {
+      id: rule.id || `${dayName}-${rule.startTime}-${rule.endTime}`,
+      text: `${dayName} - ${locationText} - ${rule.startTime} to ${rule.endTime}`,
+    };
+  });
+}
+
+function getLocationNames(locationIds, locations) {
+  return (locationIds || [])
+    .map((locationId) => {
+      const location = locations.find((item) => item.id === locationId);
+      return location ? location.name : locationId;
+    })
+    .filter(Boolean);
+}
+
 function AdminTherapists() {
   const [therapists, setTherapists] = useState([]);
   const [services, setServices] = useState([]);
   const [locations, setLocations] = useState([]);
+  const [therapistServiceAssignments, setTherapistServiceAssignments] =
+    useState([]);
 
   const [loading, setLoading] = useState(true);
   const [savingTherapist, setSavingTherapist] = useState(false);
   const [savingSetup, setSavingSetup] = useState(false);
+  const [updatingAssignmentStatus, setUpdatingAssignmentStatus] = useState("");
 
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -60,11 +103,8 @@ function AdminTherapists() {
 
   const [setupForm, setSetupForm] = useState({
     therapistId: "",
-    serviceId: "",
-    locationId: "",
-    availableDays: [1, 2, 3, 4, 5],
-    startTime: "09:00",
-    endTime: "17:00",
+    serviceIds: [],
+    locationIds: [],
     telehealth: true,
     inPerson: true,
   });
@@ -88,11 +128,13 @@ function AdminTherapists() {
     setError("");
 
     try {
-      const [therapistsData, servicesData, locationsData] = await Promise.all([
-        apiRequest("/therapists"),
-        apiRequest("/services"),
-        apiRequest("/locations"),
-      ]);
+      const [therapistsData, servicesData, locationsData, assignmentsData] =
+        await Promise.all([
+          apiRequest("/therapists"),
+          apiRequest("/services"),
+          apiRequest("/locations"),
+          apiRequest("/therapist-services"),
+        ]);
 
       const activeServices = (servicesData.services || []).filter(
         (service) => service.status === "active",
@@ -106,12 +148,14 @@ function AdminTherapists() {
       setServices(activeServices);
       setLocations(activeLocations);
 
+      setTherapistServiceAssignments(assignmentsData.assignments || []);
+
       setSetupForm((current) => ({
         ...current,
         therapistId:
           current.therapistId || therapistsData.therapists?.[0]?.id || "",
-        serviceId: current.serviceId || activeServices?.[0]?.id || "",
-        locationId: current.locationId || activeLocations?.[0]?.id || "",
+        serviceIds: current.serviceIds || [],
+        locationIds: current.locationIds || [],
       }));
     } catch (err) {
       setError(err.message);
@@ -135,6 +179,32 @@ function AdminTherapists() {
     setSetupForm({
       ...setupForm,
       [name]: type === "checkbox" ? checked : value,
+    });
+  }
+
+  function toggleSetupService(serviceId) {
+    setSetupForm((current) => {
+      const alreadySelected = current.serviceIds.includes(serviceId);
+
+      return {
+        ...current,
+        serviceIds: alreadySelected
+          ? current.serviceIds.filter((id) => id !== serviceId)
+          : [...current.serviceIds, serviceId],
+      };
+    });
+  }
+
+  function toggleSetupLocation(locationId) {
+    setSetupForm((current) => {
+      const alreadySelected = current.locationIds.includes(locationId);
+
+      return {
+        ...current,
+        locationIds: alreadySelected
+          ? current.locationIds.filter((id) => id !== locationId)
+          : [...current.locationIds, locationId],
+      };
     });
   }
 
@@ -282,17 +352,18 @@ function AdminTherapists() {
 
     const appointmentTypes = getSelectedAppointmentTypes(setupForm);
 
-    if (
-      !setupForm.therapistId ||
-      !setupForm.serviceId ||
-      !setupForm.locationId
-    ) {
-      setError("Therapist, service, and location are required.");
+    if (!setupForm.therapistId) {
+      setError("Please select a therapist.");
       return;
     }
 
-    if (!setupForm.availableDays || setupForm.availableDays.length === 0) {
-      setError("Please select at least one available day.");
+    if (!setupForm.serviceIds || setupForm.serviceIds.length === 0) {
+      setError("Please select at least one service.");
+      return;
+    }
+
+    if (!setupForm.locationIds || setupForm.locationIds.length === 0) {
+      setError("Please select at least one location.");
       return;
     }
 
@@ -304,43 +375,58 @@ function AdminTherapists() {
     setSavingSetup(true);
 
     try {
-      await apiRequest("/therapist-services", {
-        method: "POST",
-        body: JSON.stringify({
-          therapistId: setupForm.therapistId,
-          serviceId: setupForm.serviceId,
-          locationIds: [setupForm.locationId],
-          appointmentTypes,
-          notes: "Assigned from frontend therapist management.",
-        }),
-      });
-
       await Promise.all(
-        setupForm.availableDays.map((dayOfWeek) =>
-          apiRequest("/availability/weekly", {
+        setupForm.serviceIds.map((serviceId) =>
+          apiRequest("/therapist-services", {
             method: "POST",
             body: JSON.stringify({
               therapistId: setupForm.therapistId,
-              dayOfWeek,
-              startTime: setupForm.startTime,
-              endTime: setupForm.endTime,
-              locationId: setupForm.locationId,
+              serviceId,
+              locationIds: setupForm.locationIds,
               appointmentTypes,
-              status: "active",
+              notes: "Assigned from frontend therapist management.",
             }),
           }),
         ),
       );
 
       setMessage(
-        `Therapist service assignment and availability created for ${setupForm.availableDays.length} day(s).`,
+        `Therapist assigned to ${setupForm.serviceIds.length} service(s) successfully.`,
       );
+
+      setSetupForm((current) => ({
+        ...current,
+        serviceIds: [],
+        locationIds: [],
+      }));
 
       await loadData();
     } catch (err) {
       setError(err.message);
     } finally {
       setSavingSetup(false);
+    }
+  }
+
+  async function updateAssignmentStatus(assignmentId, status) {
+    setUpdatingAssignmentStatus(assignmentId + status);
+    setError("");
+    setMessage("");
+
+    try {
+      await apiRequest(`/therapist-services/${assignmentId}/status`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          status,
+        }),
+      });
+
+      setMessage(`Therapist service assignment changed to ${status}.`);
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setUpdatingAssignmentStatus("");
     }
   }
 
@@ -500,10 +586,11 @@ function AdminTherapists() {
       </div>
 
       <div className="card">
-        <h2>Make Therapist Bookable</h2>
+        <h2>Assign Services to Therapist</h2>
         <p>
-          After creating a therapist, assign service, location, and weekly
-          availability so the therapist can appear in available slots.
+          Select one therapist, choose multiple services, locations, and
+          appointment types. Weekly availability is managed separately from the
+          Availability page.
         </p>
 
         <form onSubmit={makeTherapistBookable}>
@@ -523,107 +610,6 @@ function AdminTherapists() {
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div>
-              <label>Service</label>
-              <select
-                className="input"
-                name="serviceId"
-                value={setupForm.serviceId}
-                onChange={handleSetupFormChange}
-              >
-                <option value="">Select service</option>
-                {services.map((service) => (
-                  <option key={service.id} value={service.id}>
-                    {service.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label>Location</label>
-              <select
-                className="input"
-                name="locationId"
-                value={setupForm.locationId}
-                onChange={handleSetupFormChange}
-              >
-                <option value="">Select location</option>
-                {locations.map((location) => (
-                  <option key={location.id} value={location.id}>
-                    {location.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="available-days-box">
-              <label>Available Days</label>
-
-              <div className="quick-day-actions">
-                <button
-                  className="btn secondary small-btn"
-                  type="button"
-                  onClick={selectWeekdays}
-                >
-                  Weekdays
-                </button>
-
-                <button
-                  className="btn secondary small-btn"
-                  type="button"
-                  onClick={selectAllDays}
-                >
-                  Whole Week
-                </button>
-
-                <button
-                  className="btn secondary small-btn"
-                  type="button"
-                  onClick={clearDays}
-                >
-                  Clear
-                </button>
-              </div>
-
-              <div className="day-checkbox-grid">
-                {DAYS.map((day) => (
-                  <label key={day.value} className="day-checkbox">
-                    <input
-                      type="checkbox"
-                      checked={setupForm.availableDays.includes(day.value)}
-                      onChange={() => toggleAvailableDay(day.value)}
-                    />
-                    {day.label}
-                  </label>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="form-grid">
-            <div>
-              <label>Start Time</label>
-              <input
-                className="input"
-                type="time"
-                name="startTime"
-                value={setupForm.startTime}
-                onChange={handleSetupFormChange}
-              />
-            </div>
-
-            <div>
-              <label>End Time</label>
-              <input
-                className="input"
-                type="time"
-                name="endTime"
-                value={setupForm.endTime}
-                onChange={handleSetupFormChange}
-              />
             </div>
 
             <div className="checkbox-field">
@@ -651,12 +637,140 @@ function AdminTherapists() {
             </div>
           </div>
 
+          <div className="form-grid form-grid-two">
+            <div>
+              <label>Services</label>
+              <div className="day-checkbox-grid">
+                {services.map((service) => (
+                  <label key={service.id} className="day-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={setupForm.serviceIds.includes(service.id)}
+                      onChange={() => toggleSetupService(service.id)}
+                    />
+                    {service.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <div>
+              <label>Locations</label>
+              <div className="day-checkbox-grid">
+                {locations.map((location) => (
+                  <label key={location.id} className="day-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={setupForm.locationIds.includes(location.id)}
+                      onChange={() => toggleSetupLocation(location.id)}
+                    />
+                    {location.name}
+                  </label>
+                ))}
+              </div>
+            </div>
+          </div>
+
           <div className="form-actions">
             <button className="btn" type="submit" disabled={savingSetup}>
-              {savingSetup ? "Saving..." : "Save Service + Availability"}
+              {savingSetup ? "Saving..." : "Save Therapist Services"}
             </button>
+
+            <a className="btn secondary" href="/admin/availability">
+              Manage Availability
+            </a>
           </div>
         </form>
+      </div>
+
+      <div className="card">
+        <h2>Therapist Service Assignments</h2>
+
+        {therapistServiceAssignments.length === 0 ? (
+          <p>No therapist service assignments found.</p>
+        ) : (
+          <table className="table">
+            <thead>
+              <tr>
+                <th>Therapist</th>
+                <th>Service</th>
+                <th>Locations</th>
+                <th>Types</th>
+                <th>Status</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {therapistServiceAssignments.map((assignment) => (
+                <tr key={assignment.id}>
+                  <td>
+                    <strong>{assignment.therapistName || "-"}</strong>
+                    <br />
+                    <small>{assignment.therapistEmail || ""}</small>
+                  </td>
+
+                  <td>{assignment.serviceName || assignment.serviceId}</td>
+
+                  <td>
+                    {getLocationNames(assignment.locationIds, locations).length
+                      ? getLocationNames(
+                          assignment.locationIds,
+                          locations,
+                        ).join(", ")
+                      : "-"}
+                  </td>
+
+                  <td>
+                    {(assignment.appointmentTypes || []).join(", ") || "-"}
+                  </td>
+
+                  <td>
+                    <span className={`badge ${assignment.status}`}>
+                      {assignment.status}
+                    </span>
+                  </td>
+
+                  <td>
+                    <div className="row-actions">
+                      {assignment.status !== "active" ? (
+                        <button
+                          className="btn small-btn"
+                          type="button"
+                          disabled={
+                            updatingAssignmentStatus ===
+                            assignment.id + "active"
+                          }
+                          onClick={() =>
+                            updateAssignmentStatus(assignment.id, "active")
+                          }
+                        >
+                          Activate
+                        </button>
+                      ) : null}
+
+                      {assignment.status !== "inactive" ? (
+                        <button
+                          className="btn secondary small-btn"
+                          type="button"
+                          disabled={
+                            updatingAssignmentStatus ===
+                            assignment.id + "inactive"
+                          }
+                          onClick={() =>
+                            updateAssignmentStatus(assignment.id, "inactive")
+                          }
+                        >
+                          Deactivate
+                        </button>
+                      ) : null}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
 
       <div className="card">
@@ -670,7 +784,9 @@ function AdminTherapists() {
               <tr>
                 <th>Therapist</th>
                 <th>Title</th>
+                <th>Therapy Services</th>
                 <th>Appointment Types</th>
+                <th>Availability</th>
                 <th>Status</th>
               </tr>
             </thead>
@@ -689,7 +805,21 @@ function AdminTherapists() {
                   <td>{therapist.title || "-"}</td>
 
                   <td>
+                    {getServiceNames(therapist).length
+                      ? getServiceNames(therapist).join(", ")
+                      : "No services assigned"}
+                  </td>
+
+                  <td>
                     {(therapist.appointmentTypes || []).join(", ") || "-"}
+                  </td>
+
+                  <td>
+                    {getAvailabilityRows(therapist).length
+                      ? getAvailabilityRows(therapist).map((row) => (
+                          <div key={row.id}>{row.text}</div>
+                        ))
+                      : "No availability assigned"}
                   </td>
 
                   <td>

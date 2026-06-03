@@ -185,6 +185,47 @@ router.post(
 
     const db = loadDB();
 
+    if (!db.therapistServices) {
+      db.therapistServices = [];
+    }
+
+    const existingAssignment = db.therapistServices.find(function (assignment) {
+      return (
+        assignment.therapistId === result.data.therapistId &&
+        assignment.serviceId === result.data.serviceId
+      );
+    });
+
+    if (existingAssignment) {
+      const currentLocationIds = existingAssignment.locationIds || [];
+      const newLocationIds = result.data.locationIds || [];
+
+      const currentAppointmentTypes = existingAssignment.appointmentTypes || [];
+      const newAppointmentTypes = result.data.appointmentTypes || [];
+
+      existingAssignment.locationIds = Array.from(
+        new Set([...currentLocationIds, ...newLocationIds]),
+      );
+
+      existingAssignment.appointmentTypes = Array.from(
+        new Set([...currentAppointmentTypes, ...newAppointmentTypes]),
+      );
+
+      existingAssignment.notes =
+        result.data.notes || existingAssignment.notes || "";
+      existingAssignment.status = "active";
+      existingAssignment.updatedAt = new Date().toISOString();
+
+      saveDB(db);
+
+      return res.json({
+        success: true,
+        message: "Therapist service assignment updated successfully",
+        therapistService: existingAssignment,
+        assignment: existingAssignment,
+      });
+    }
+
     const therapist = db.therapists.find(function (item) {
       return item.id === result.data.therapistId;
     });
@@ -221,18 +262,33 @@ router.post(
       });
     }
 
-    const duplicate = db.therapistServices.find(function (assignment) {
-      return (
-        assignment.therapistId === result.data.therapistId &&
-        assignment.serviceId === result.data.serviceId &&
-        assignment.status === "active"
-      );
-    });
+    if (existingAssignment) {
+      const currentLocationIds = existingAssignment.locationIds || [];
+      const newLocationIds = result.data.locationIds || [];
 
-    if (duplicate) {
-      return res.status(400).json({
-        success: false,
-        message: "This therapist is already assigned to this service"
+      const currentAppointmentTypes = existingAssignment.appointmentTypes || [];
+      const newAppointmentTypes = result.data.appointmentTypes || [];
+
+      existingAssignment.locationIds = Array.from(
+        new Set([...currentLocationIds, ...newLocationIds]),
+      );
+
+      existingAssignment.appointmentTypes = Array.from(
+        new Set([...currentAppointmentTypes, ...newAppointmentTypes]),
+      );
+
+      existingAssignment.notes =
+        result.data.notes || existingAssignment.notes || "";
+
+      existingAssignment.status = "active";
+      existingAssignment.updatedAt = new Date().toISOString();
+
+      saveDB(db);
+
+      return res.json({
+        success: true,
+        message: "Therapist service assignment updated successfully",
+        therapistService: existingAssignment,
       });
     }
 
