@@ -70,6 +70,56 @@ function getLocationNames(locationIds, locations) {
     .filter(Boolean);
 }
 
+function getLocationType(location) {
+  if (!location) {
+    return "";
+  }
+
+  const rawType = location.locationType || location.type || "";
+  const normalizedType = String(rawType).toLowerCase();
+
+  if (normalizedType === "virtual") {
+    return "virtual";
+  }
+
+  if (normalizedType === "office") {
+    return "office";
+  }
+
+  const name = String(
+    location.name || location.locationName || "",
+  ).toLowerCase();
+
+  if (
+    name.includes("virtual") ||
+    name.includes("online") ||
+    name.includes("telehealth")
+  ) {
+    return "virtual";
+  }
+
+  return "office";
+}
+
+function getAppointmentTypesFromLocations(locationIds, locations) {
+  const types = [];
+
+  (locationIds || []).forEach((locationId) => {
+    const location = locations.find((item) => item.id === locationId);
+    const locationType = getLocationType(location);
+
+    if (locationType === "virtual" && !types.includes("telehealth")) {
+      types.push("telehealth");
+    }
+
+    if (locationType === "office" && !types.includes("in_person")) {
+      types.push("in_person");
+    }
+  });
+
+  return types;
+}
+
 function AdminTherapists() {
   const [therapists, setTherapists] = useState([]);
   const [services, setServices] = useState([]);
@@ -208,42 +258,6 @@ function AdminTherapists() {
     });
   }
 
-  function toggleAvailableDay(dayValue) {
-    const dayNumber = Number(dayValue);
-
-    setSetupForm((current) => {
-      const alreadySelected = current.availableDays.includes(dayNumber);
-
-      return {
-        ...current,
-        availableDays: alreadySelected
-          ? current.availableDays.filter((day) => day !== dayNumber)
-          : [...current.availableDays, dayNumber].sort(),
-      };
-    });
-  }
-
-  function selectWeekdays() {
-    setSetupForm((current) => ({
-      ...current,
-      availableDays: [1, 2, 3, 4, 5],
-    }));
-  }
-
-  function selectAllDays() {
-    setSetupForm((current) => ({
-      ...current,
-      availableDays: [0, 1, 2, 3, 4, 5, 6],
-    }));
-  }
-
-  function clearDays() {
-    setSetupForm((current) => ({
-      ...current,
-      availableDays: [],
-    }));
-  }
-
   async function createTherapist(event) {
     event.preventDefault();
 
@@ -350,7 +364,10 @@ function AdminTherapists() {
     setError("");
     setMessage("");
 
-    const appointmentTypes = getSelectedAppointmentTypes(setupForm);
+    const appointmentTypes = getAppointmentTypesFromLocations(
+      setupForm.locationIds,
+      locations,
+    );
 
     if (!setupForm.therapistId) {
       setError("Please select a therapist.");
@@ -368,7 +385,9 @@ function AdminTherapists() {
     }
 
     if (appointmentTypes.length === 0) {
-      setError("Select at least one appointment type.");
+      setError(
+        "Appointment type could not be detected from selected locations.",
+      );
       return;
     }
 

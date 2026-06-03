@@ -13,6 +13,7 @@ import AdminServices from "./pages/admin/AdminServices";
 import AdminLocations from "./pages/admin/AdminLocations";
 import AdminAvailability from "./pages/admin/AdminAvailability";
 import AdminRooms from "./pages/admin/AdminRooms";
+import CalendarPage from "./pages/shared/CalendarPage";
 
 import { getUser, isLoggedIn, hasRole } from "./utils/auth";
 
@@ -110,6 +111,15 @@ function App() {
       />
 
       <Route
+        path="/admin/availability"
+        element={
+          <ProtectedRoute roles={["admin"]}>
+            <AdminAvailability />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
         path="/admin/rooms"
         element={
           <ProtectedRoute roles={["admin"]}>
@@ -119,19 +129,19 @@ function App() {
       />
 
       <Route
-        path="/manager"
+        path="/admin/calendar"
         element={
-          <ProtectedRoute roles={["office_manager"]}>
-            <ManagerDashboard />
+          <ProtectedRoute roles={["admin"]}>
+            <CalendarPage role="admin" />
           </ProtectedRoute>
         }
       />
 
       <Route
-        path="/admin/availability"
+        path="/manager"
         element={
-          <ProtectedRoute roles={["admin"]}>
-            <AdminAvailability />
+          <ProtectedRoute roles={["office_manager"]}>
+            <ManagerDashboard />
           </ProtectedRoute>
         }
       />
@@ -209,6 +219,15 @@ function App() {
       />
 
       <Route
+        path="/manager/calendar"
+        element={
+          <ProtectedRoute roles={["office_manager"]}>
+            <CalendarPage role="office_manager" />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
         path="/therapist"
         element={
           <ProtectedRoute roles={["therapist"]}>
@@ -218,10 +237,28 @@ function App() {
       />
 
       <Route
+        path="/therapist/calendar"
+        element={
+          <ProtectedRoute roles={["therapist"]}>
+            <CalendarPage role="therapist" />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
         path="/client"
         element={
           <ProtectedRoute roles={["client"]}>
             <ClientDashboard />
+          </ProtectedRoute>
+        }
+      />
+
+      <Route
+        path="/client/calendar"
+        element={
+          <ProtectedRoute roles={["client"]}>
+            <CalendarPage role="client" />
           </ProtectedRoute>
         }
       />

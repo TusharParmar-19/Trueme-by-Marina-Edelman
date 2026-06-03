@@ -55,8 +55,8 @@ function getAssignmentDetails(db, assignment) {
 
   const therapistUser = therapist
     ? db.users.find(function (user) {
-        return user.id === therapist.userId;
-      })
+      return user.id === therapist.userId;
+    })
     : null;
 
   const service = db.services.find(function (item) {
@@ -259,36 +259,6 @@ router.post(
       return res.status(400).json({
         success: false,
         message: "Service is not active"
-      });
-    }
-
-    if (existingAssignment) {
-      const currentLocationIds = existingAssignment.locationIds || [];
-      const newLocationIds = result.data.locationIds || [];
-
-      const currentAppointmentTypes = existingAssignment.appointmentTypes || [];
-      const newAppointmentTypes = result.data.appointmentTypes || [];
-
-      existingAssignment.locationIds = Array.from(
-        new Set([...currentLocationIds, ...newLocationIds]),
-      );
-
-      existingAssignment.appointmentTypes = Array.from(
-        new Set([...currentAppointmentTypes, ...newAppointmentTypes]),
-      );
-
-      existingAssignment.notes =
-        result.data.notes || existingAssignment.notes || "";
-
-      existingAssignment.status = "active";
-      existingAssignment.updatedAt = new Date().toISOString();
-
-      saveDB(db);
-
-      return res.json({
-        success: true,
-        message: "Therapist service assignment updated successfully",
-        therapistService: existingAssignment,
       });
     }
 

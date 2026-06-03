@@ -5,6 +5,19 @@ import { apiRequest } from "../../api/apiClient";
 import { getUser, logout } from "../../utils/auth";
 import DashboardLayout from "../../layouts/DashboardLayout";
 
+function getRoomDisplay(appointment) {
+  if (appointment.appointmentType === "telehealth") {
+    return "Online";
+  }
+
+  return (
+    appointment.roomName ||
+    appointment.room?.name ||
+    appointment.roomId ||
+    "Not assigned"
+  );
+}
+
 function TherapistDashboard() {
   const navigate = useNavigate();
   const user = getUser();
@@ -46,9 +59,9 @@ function TherapistDashboard() {
 
   return (
     <DashboardLayout
-    title="Therapist Dashboard"
-    subtitle={`Welcome, ${user?.name || "Therapist"}`}
-  >
+      title="Therapist Dashboard"
+      subtitle={`Welcome, ${user?.name || "Therapist"}`}
+    >
       {/* <div className="dashboard-header">
         <div>
           <h1>Therapist Dashboard</h1>
@@ -70,7 +83,9 @@ function TherapistDashboard() {
         />
       </div>
 
-      {loading ? <div className="card">Loading therapist dashboard...</div> : null}
+      {loading ? (
+        <div className="card">Loading therapist dashboard...</div>
+      ) : null}
 
       {error ? <div className="card error">{error}</div> : null}
 
@@ -112,6 +127,7 @@ function TherapistDashboard() {
                     <th>Client</th>
                     <th>Service</th>
                     <th>Location</th>
+                    <th>Room</th>
                     <th>Status</th>
                   </tr>
                 </thead>
@@ -129,6 +145,7 @@ function TherapistDashboard() {
                       </td>
                       <td>{appointment.serviceName}</td>
                       <td>{appointment.locationName}</td>
+                      <td>{getRoomDisplay(appointment)}</td>
                       <td>
                         <span className={`badge ${appointment.status}`}>
                           {appointment.status}
@@ -155,6 +172,7 @@ function TherapistDashboard() {
                     <th>Client</th>
                     <th>Service</th>
                     <th>Location</th>
+                    <th>Room</th>
                     <th>Status</th>
                   </tr>
                 </thead>
@@ -173,6 +191,7 @@ function TherapistDashboard() {
                       </td>
                       <td>{appointment.serviceName}</td>
                       <td>{appointment.locationName}</td>
+                      <td>{getRoomDisplay(appointment)}</td>
                       <td>
                         <span className={`badge ${appointment.status}`}>
                           {appointment.status}

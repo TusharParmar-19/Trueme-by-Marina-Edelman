@@ -95,8 +95,8 @@ function sanitizeAppointment(appointment, db) {
 
   const therapistUser = therapist
     ? db.users.find(function (user) {
-        return user.id === therapist.userId;
-      })
+      return user.id === therapist.userId;
+    })
     : null;
 
   const service = db.services.find(function (item) {

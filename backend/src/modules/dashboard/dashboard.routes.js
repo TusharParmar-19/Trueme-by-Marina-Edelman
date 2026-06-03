@@ -54,6 +54,10 @@ function appointmentSummary(appointment, db) {
   const service = getServiceById(db, appointment.serviceId);
   const location = getLocationById(db, appointment.locationId);
 
+  const room = (db.rooms || []).find(function (item) {
+    return item.id === appointment.roomId;
+  });
+
   return {
     id: appointment.id,
     clientId: appointment.clientId,
@@ -65,6 +69,8 @@ function appointmentSummary(appointment, db) {
     serviceName: service ? service.name : null,
     locationId: appointment.locationId,
     locationName: location ? location.name : null,
+    roomId: appointment.roomId || null,
+    roomName: room ? room.name : null,
     appointmentType: appointment.appointmentType,
     date: appointment.date,
     startTime: appointment.startTime,

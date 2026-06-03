@@ -5,6 +5,19 @@ import { apiRequest } from "../../api/apiClient";
 import { getUser, logout } from "../../utils/auth";
 import DashboardLayout from "../../layouts/DashboardLayout";
 
+function getRoomDisplay(appointment) {
+  if (appointment.appointmentType === "telehealth") {
+    return "Online";
+  }
+
+  return (
+    appointment.roomName ||
+    appointment.room?.name ||
+    appointment.roomId ||
+    "Room will be assigned"
+  );
+}
+
 function getLocationType(location) {
   if (!location) {
     return "";
@@ -1070,6 +1083,7 @@ function ClientDashboard() {
                     <th>Therapist</th>
                     <th>Service</th>
                     <th>Location</th>
+                    <th>Room</th>
                     <th>Status</th>
                     <th>Actions</th>
                   </tr>
@@ -1085,6 +1099,7 @@ function ClientDashboard() {
                       <td>{appointment.therapistName}</td>
                       <td>{appointment.serviceName}</td>
                       <td>{appointment.locationName}</td>
+                      <td>{getRoomDisplay(appointment)}</td>
                       <td>
                         <span className={`badge ${appointment.status}`}>
                           {appointment.status}

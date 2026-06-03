@@ -25,6 +25,7 @@ function DashboardLayout({ children, title, subtitle }) {
         { label: "Locations", path: "/admin/locations" },
         { label: "Availability", path: "/admin/availability" },
         { label: "Rooms", path: "/admin/rooms" },
+        { label: "Calendar", path: "/admin/calendar" },
       ];
     }
 
@@ -39,18 +40,25 @@ function DashboardLayout({ children, title, subtitle }) {
         { label: "Locations", path: "/manager/locations" },
         { label: "Availability", path: "/manager/availability" },
         { label: "Rooms", path: "/manager/rooms" },
+        { label: "Calendar", path: "/manager/calendar" },
       ];
     }
 
-    if (user.role === "therapist") {
-      return [{ label: "Dashboard", path: "/therapist" }];
+    if (user.role === "therapist") { 
+      return [
+        { label: "Dashboard", path: "/therapist" },
+        { label: "Calendar", path: "/therapist/calendar" }
+      ];
     }
 
     if (user.role === "client") {
-      return [{ label: "Dashboard", path: "/client" }];
+      return [
+        { label: "Dashboard", path: "/client" },
+        { label: "Calendar", path: "/client/calendar" }
+      ];
     }
 
-    return [];
+    return []; 
   }
 
   const links = getLinks();
