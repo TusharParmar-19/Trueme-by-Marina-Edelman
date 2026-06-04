@@ -12,6 +12,13 @@ function AdminClients() {
     password: "Client12345",
   });
 
+  const [editingClient, setEditingClient] = useState(null);
+  const [editForm, setEditForm] = useState({
+    name: "",
+    email: "",
+  });
+  const [editSaving, setEditSaving] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [updatingStatus, setUpdatingStatus] = useState("");
@@ -105,6 +112,53 @@ function AdminClients() {
     loadClients();
   }, []);
 
+  function startEditClient(client) {
+    setEditingClient(client);
+    setEditForm({
+      name: client.name || "",
+      email: client.email || "",
+    });
+    setError("");
+    setMessage("");
+  }
+
+  function cancelEditClient() {
+    setEditingClient(null);
+    setEditForm({
+      name: "",
+      email: "",
+    });
+  }
+
+  async function updateClient(event) {
+    event.preventDefault();
+
+    if (!editingClient) {
+      return;
+    }
+
+    try {
+      setEditSaving(true);
+      setError("");
+
+      await apiRequest(`/users/${editingClient.id}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: editForm.name,
+          email: editForm.email,
+        }),
+      });
+
+      setMessage("Client updated successfully.");
+      cancelEditClient();
+      await loadClients();
+    } catch (error) {
+      setError(error.message || "Failed to update client");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
   return (
     <DashboardLayout title="Clients" subtitle="Add and manage client accounts.">
       {loading ? <div className="card">Loading clients...</div> : null}
@@ -168,6 +222,61 @@ function AdminClients() {
         </form>
       </div>
 
+      {editingClient && (
+        <div className="card">
+          <h2>Edit Client</h2>
+
+          <form onSubmit={updateClient} className="form-grid">
+            <div>
+              <label>Name</label>
+              <input
+                className="input"
+                type="text"
+                value={editForm.name}
+                onChange={(event) =>
+                  setEditForm({
+                    ...editForm,
+                    name: event.target.value,
+                  })
+                }
+                required
+              />
+            </div>
+
+            <div>
+              <label>Email</label>
+              <input
+                className="input"
+                type="email"
+                value={editForm.email}
+                onChange={(event) =>
+                  setEditForm({
+                    ...editForm,
+                    email: event.target.value,
+                  })
+                }
+                required
+              />
+            </div>
+
+            <div style={{ display: "flex", gap: "10px", alignItems: "end" }}>
+              <button type="submit" className="btn" disabled={editSaving}>
+                {editSaving ? "Updating..." : "Update Client"}
+              </button>
+
+              <button
+                type="button"
+                className="btn secondary"
+                onClick={cancelEditClient}
+                disabled={editSaving}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
       <div className="card">
         <h2>Clients</h2>
 
@@ -208,6 +317,14 @@ function AdminClients() {
 
                   <td>
                     <div className="row-actions">
+                      <button
+                        className="btn secondary small-btn"
+                        type="button"
+                        onClick={() => startEditClient(client)}
+                      >
+                        Edit
+                      </button>
+
                       {client.status !== "active" ? (
                         <button
                           className="btn small-btn"
