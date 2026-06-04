@@ -82,19 +82,23 @@ function ClientDashboard() {
 
   const [selectedBookingPlace, setSelectedBookingPlace] = useState(null);
 
-  const [waitlistForm, setWaitlistForm] = useState({
+  const defaultWaitlistForm = {
     preferredStartTime: "09:00",
     preferredEndTime: "12:00",
-  });
+  };
 
-  const [bookingForm, setBookingForm] = useState({
+  const defaultBookingForm = {
     date: "2026-06-08",
     serviceId: "",
     locationId: "",
     appointmentType: "telehealth",
     therapistId: "",
     startTime: "",
-  });
+  };
+
+  const [waitlistForm, setWaitlistForm] = useState(defaultWaitlistForm);
+
+  const [bookingForm, setBookingForm] = useState(defaultBookingForm);
 
   const [loading, setLoading] = useState(true);
   const [slotLoading, setSlotLoading] = useState(false);
@@ -240,6 +244,16 @@ function ClientDashboard() {
     setSlots([]);
     setSuggestedSlots([]);
     setMessage("");
+  }
+
+  function resetBookingFlowAfterSuccess() {
+    setBookingForm(defaultBookingForm);
+    setWaitlistForm(defaultWaitlistForm);
+    setSlots([]);
+    setSuggestedSlots([]);
+    setTherapists([]);
+    setSelectedBookingPlace(null);
+    setBookingStep("closed");
   }
 
   async function loadDashboard(selectedDate = bookingForm.date) {
@@ -453,14 +467,12 @@ function ClientDashboard() {
         }),
       });
 
-      setMessage("Appointment booked successfully.");
-      setSlots([]);
-      setBookingForm((current) => ({
-        ...current,
-        startTime: "",
-      }));
+      const selectedDate = bookingForm.date;
 
-      await loadDashboard(bookingForm.date);
+      setMessage("Appointment booked successfully.");
+      resetBookingFlowAfterSuccess();
+
+      await loadDashboard(selectedDate);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -652,12 +664,16 @@ function ClientDashboard() {
           preferredDate: bookingForm.date,
           preferredStartTime: waitlistForm.preferredStartTime,
           preferredEndTime: waitlistForm.preferredEndTime,
-          notes: "Client joined waitlist from frontend.",
+          notes: "Requested from client portal.",
         }),
       });
 
+      const selectedDate = bookingForm.date;
+
       setMessage("You have been added to the waitlist.");
-      await loadDashboard(bookingForm.date);
+      resetBookingFlowAfterSuccess();
+
+      await loadDashboard(selectedDate);
     } catch (err) {
       setError(err.message);
     } finally {

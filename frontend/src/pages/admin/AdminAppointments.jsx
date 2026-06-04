@@ -82,13 +82,15 @@ function AdminAppointments() {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
 
-  const [bookingForm, setBookingForm] = useState({
+  const defaultBookingForm = {
     clientId: "",
     serviceId: "",
     locationId: "",
     appointmentType: "telehealth",
-    startTime: ""
-  });
+    startTime: "",
+  };
+
+  const [bookingForm, setBookingForm] = useState(defaultBookingForm);
 
   const [rescheduleForm, setRescheduleForm] = useState(null);
 const [rescheduleSlots, setRescheduleSlots] = useState([]);
@@ -138,6 +140,17 @@ const [rescheduleLoading, setRescheduleLoading] = useState(false);
     } catch (err) {
       setError(err.message);
     }
+  }
+
+  function resetBookingFormAfterSuccess() {
+    setBookingForm((current) => ({
+      ...defaultBookingForm,
+      clientId: clients?.[0]?.id || current.clientId || "",
+      serviceId: services?.[0]?.id || current.serviceId || "",
+      locationId: locations?.[0]?.id || current.locationId || "",
+    }));
+
+    setSlots([]);
   }
 
   async function checkSlots() {
@@ -214,11 +227,7 @@ const [rescheduleLoading, setRescheduleLoading] = useState(false);
       });
 
       setMessage("Appointment booked successfully.");
-      setSlots([]);
-      setBookingForm((current) => ({
-        ...current,
-        startTime: ""
-      }));
+      resetBookingFormAfterSuccess();
 
       loadAppointments(date);
     } catch (err) {
@@ -286,7 +295,7 @@ const [rescheduleLoading, setRescheduleLoading] = useState(false);
         ...bookingForm,
         locationId: value,
         appointmentType,
-        slot: "",
+        startTime: "",
       });
 
       setSlots([]);
