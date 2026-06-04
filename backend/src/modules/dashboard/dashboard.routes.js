@@ -1,6 +1,7 @@
 const express = require("express");
 
-const { loadDB } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+
 const {
   authMiddleware,
   allowRoles
@@ -12,6 +13,48 @@ const router = express.Router();
 
 function getToday() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
+}
+
+function serializePrismaRecord(record) {
+  const output = {};
+
+  Object.keys(record).forEach(function (key) {
+    output[key] = toIso(record[key]);
+  });
+
+  return output;
+}
+
+async function loadDashboardSnapshot() {
+  const users = await prisma.user.findMany();
+  const therapists = await prisma.therapist.findMany();
+  const services = await prisma.service.findMany();
+  const locations = await prisma.location.findMany();
+  const rooms = await prisma.room.findMany();
+  const appointments = await prisma.appointment.findMany();
+  const waitlist = await prisma.waitlist.findMany();
+
+  return {
+    users: users.map(serializePrismaRecord),
+    therapists: therapists.map(serializePrismaRecord),
+    services: services.map(serializePrismaRecord),
+    locations: locations.map(serializePrismaRecord),
+    rooms: rooms.map(serializePrismaRecord),
+    appointments: appointments.map(serializePrismaRecord),
+    waitlist: waitlist.map(serializePrismaRecord)
+  };
 }
 
 function isActiveAppointment(appointment) {
@@ -29,7 +72,9 @@ function getTherapistUser(db, therapistId) {
     return item.id === therapistId;
   });
 
-  if (!therapist) return null;
+  if (!therapist) {
+    return null;
+  }
 
   return db.users.find(function (user) {
     return user.id === therapist.userId;
@@ -107,8 +152,14 @@ function sortAppointments(a, b) {
   const aValue = a.date + " " + a.startTime;
   const bValue = b.date + " " + b.startTime;
 
-  if (aValue < bValue) return -1;
-  if (aValue > bValue) return 1;
+  if (aValue < bValue) {
+    return -1;
+  }
+
+  if (aValue > bValue) {
+    return 1;
+  }
+
   return 0;
 }
 
@@ -127,81 +178,90 @@ router.get(
   "/admin",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const db = await loadDashboardSnapshot();
 
-    const date = req.query.date || getToday();
+      const date = req.query.date || getToday();
 
-    const activeUsers = db.users.filter(function (user) {
-      return user.status === "active";
-    });
+      const activeUsers = db.users.filter(function (user) {
+        return user.status === "active";
+      });
 
-    const todayAppointments = db.appointments.filter(function (appointment) {
-      return appointment.date === date && isActiveAppointment(appointment);
-    });
+      const todayAppointments = db.appointments.filter(function (appointment) {
+        return appointment.date === date && isActiveAppointment(appointment);
+      });
 
-    const upcomingAppointments = db.appointments.filter(function (appointment) {
-      return appointment.date >= date && isActiveAppointment(appointment);
-    });
+      const upcomingAppointments = db.appointments.filter(function (appointment) {
+        return appointment.date >= date && isActiveAppointment(appointment);
+      });
 
-    const activeWaitlist = db.waitlist.filter(function (entry) {
-      return entry.status === "active";
-    });
+      const activeWaitlist = db.waitlist.filter(function (entry) {
+        return entry.status === "active";
+      });
 
-    const therapistWorkload = db.therapists.map(function (therapist) {
-      const therapistUser = getUserById(db, therapist.userId);
+      const therapistWorkload = db.therapists.map(function (therapist) {
+        const therapistUser = getUserById(db, therapist.userId);
 
-      const todayCount = todayAppointments.filter(function (appointment) {
-        return appointment.therapistId === therapist.id;
-      }).length;
+        const todayCount = todayAppointments.filter(function (appointment) {
+          return appointment.therapistId === therapist.id;
+        }).length;
 
-      const upcomingCount = upcomingAppointments.filter(function (appointment) {
-        return appointment.therapistId === therapist.id;
-      }).length;
+        const upcomingCount = upcomingAppointments.filter(function (appointment) {
+          return appointment.therapistId === therapist.id;
+        }).length;
 
-      return {
-        therapistId: therapist.id,
-        therapistName: therapistUser ? therapistUser.name : null,
-        therapistEmail: therapistUser ? therapistUser.email : null,
-        profileStatus: therapist.profileStatus,
-        todayAppointments: todayCount,
-        upcomingAppointments: upcomingCount
-      };
-    });
+        return {
+          therapistId: therapist.id,
+          therapistName: therapistUser ? therapistUser.name : null,
+          therapistEmail: therapistUser ? therapistUser.email : null,
+          profileStatus: therapist.profileStatus,
+          todayAppointments: todayCount,
+          upcomingAppointments: upcomingCount
+        };
+      });
 
-    return res.json({
-      success: true,
-      date,
-      summary: {
-        totalUsers: db.users.length,
-        activeUsers: activeUsers.length,
-        totalClients: db.users.filter(function (user) {
-          return user.role === USER_ROLES.CLIENT;
-        }).length,
-        totalTherapistUsers: db.users.filter(function (user) {
-          return user.role === USER_ROLES.THERAPIST;
-        }).length,
-        totalOfficeManagers: db.users.filter(function (user) {
-          return user.role === USER_ROLES.OFFICE_MANAGER;
-        }).length,
-        totalTherapistProfiles: db.therapists.length,
-        activeTherapistProfiles: db.therapists.filter(function (therapist) {
-          return therapist.profileStatus === "active";
-        }).length,
-        activeServices: db.services.filter(function (service) {
-          return service.status === "active";
-        }).length,
-        activeLocations: db.locations.filter(function (location) {
-          return location.status === "active";
-        }).length,
-        todayAppointments: todayAppointments.length,
-        upcomingAppointments: upcomingAppointments.length,
-        activeWaitlist: activeWaitlist.length
-      },
-      todayAppointments: getAppointmentList(db, todayAppointments, 20),
-      upcomingAppointments: getAppointmentList(db, upcomingAppointments, 20),
-      therapistWorkload
-    });
+      return res.json({
+        success: true,
+        date,
+        summary: {
+          totalUsers: db.users.length,
+          activeUsers: activeUsers.length,
+          totalClients: db.users.filter(function (user) {
+            return user.role === USER_ROLES.CLIENT;
+          }).length,
+          totalTherapistUsers: db.users.filter(function (user) {
+            return user.role === USER_ROLES.THERAPIST;
+          }).length,
+          totalOfficeManagers: db.users.filter(function (user) {
+            return user.role === USER_ROLES.OFFICE_MANAGER;
+          }).length,
+          totalTherapistProfiles: db.therapists.length,
+          activeTherapistProfiles: db.therapists.filter(function (therapist) {
+            return therapist.profileStatus === "active";
+          }).length,
+          activeServices: db.services.filter(function (service) {
+            return service.status === "active";
+          }).length,
+          activeLocations: db.locations.filter(function (location) {
+            return location.status === "active";
+          }).length,
+          todayAppointments: todayAppointments.length,
+          upcomingAppointments: upcomingAppointments.length,
+          activeWaitlist: activeWaitlist.length
+        },
+        todayAppointments: getAppointmentList(db, todayAppointments, 20),
+        upcomingAppointments: getAppointmentList(db, upcomingAppointments, 20),
+        therapistWorkload
+      });
+    } catch (error) {
+      console.error("Admin dashboard error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load admin dashboard"
+      });
+    }
   }
 );
 
@@ -210,82 +270,95 @@ router.get(
   "/therapist",
   authMiddleware,
   allowRoles(USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const db = await loadDashboardSnapshot();
 
-    const date = req.query.date || getToday();
+      const date = req.query.date || getToday();
 
-    const therapistProfile = db.therapists.find(function (therapist) {
-      return therapist.userId === req.user.id;
-    });
+      const therapistProfile = db.therapists.find(function (therapist) {
+        return therapist.userId === req.user.id;
+      });
 
-    if (!therapistProfile) {
-      return res.status(404).json({
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
+
+      const therapistAppointments = db.appointments.filter(function (
+        appointment
+      ) {
+        return (
+          appointment.therapistId === therapistProfile.id &&
+          isActiveAppointment(appointment)
+        );
+      });
+
+      const todayAppointments = therapistAppointments.filter(function (
+        appointment
+      ) {
+        return appointment.date === date;
+      });
+
+      const upcomingAppointments = therapistAppointments.filter(function (
+        appointment
+      ) {
+        return appointment.date >= date;
+      });
+
+      const assignedClientIds = Array.from(
+        new Set(
+          therapistAppointments.map(function (appointment) {
+            return appointment.clientId;
+          })
+        )
+      );
+
+      const assignedClients = assignedClientIds
+        .map(function (clientId) {
+          const client = getUserById(db, clientId);
+
+          if (!client) {
+            return null;
+          }
+
+          return {
+            id: client.id,
+            name: client.name,
+            email: client.email,
+            status: client.status
+          };
+        })
+        .filter(Boolean);
+
+      return res.json({
+        success: true,
+        date,
+        therapist: {
+          id: therapistProfile.id,
+          userId: therapistProfile.userId,
+          title: therapistProfile.title,
+          profileStatus: therapistProfile.profileStatus
+        },
+        summary: {
+          todayAppointments: todayAppointments.length,
+          upcomingAppointments: upcomingAppointments.length,
+          assignedClients: assignedClients.length
+        },
+        todayAppointments: getAppointmentList(db, todayAppointments, 20),
+        upcomingAppointments: getAppointmentList(db, upcomingAppointments, 20),
+        assignedClients
+      });
+    } catch (error) {
+      console.error("Therapist dashboard error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Failed to load therapist dashboard"
       });
     }
-
-    const therapistAppointments = db.appointments.filter(function (appointment) {
-      return (
-        appointment.therapistId === therapistProfile.id &&
-        isActiveAppointment(appointment)
-      );
-    });
-
-    const todayAppointments = therapistAppointments.filter(function (
-      appointment
-    ) {
-      return appointment.date === date;
-    });
-
-    const upcomingAppointments = therapistAppointments.filter(function (
-      appointment
-    ) {
-      return appointment.date >= date;
-    });
-
-    const assignedClientIds = Array.from(
-      new Set(
-        therapistAppointments.map(function (appointment) {
-          return appointment.clientId;
-        })
-      )
-    );
-
-    const assignedClients = assignedClientIds
-      .map(function (clientId) {
-        const client = getUserById(db, clientId);
-
-        if (!client) return null;
-
-        return {
-          id: client.id,
-          name: client.name,
-          email: client.email,
-          status: client.status
-        };
-      })
-      .filter(Boolean);
-
-    return res.json({
-      success: true,
-      date,
-      therapist: {
-        id: therapistProfile.id,
-        userId: therapistProfile.userId,
-        title: therapistProfile.title,
-        profileStatus: therapistProfile.profileStatus
-      },
-      summary: {
-        todayAppointments: todayAppointments.length,
-        upcomingAppointments: upcomingAppointments.length,
-        assignedClients: assignedClients.length
-      },
-      todayAppointments: getAppointmentList(db, todayAppointments, 20),
-      upcomingAppointments: getAppointmentList(db, upcomingAppointments, 20),
-      assignedClients
-    });
   }
 );
 
@@ -294,45 +367,54 @@ router.get(
   "/client",
   authMiddleware,
   allowRoles(USER_ROLES.CLIENT),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const db = await loadDashboardSnapshot();
 
-    const date = req.query.date || getToday();
+      const date = req.query.date || getToday();
 
-    const clientAppointments = db.appointments.filter(function (appointment) {
-      return appointment.clientId === req.user.id;
-    });
+      const clientAppointments = db.appointments.filter(function (appointment) {
+        return appointment.clientId === req.user.id;
+      });
 
-    const upcomingAppointments = clientAppointments.filter(function (
-      appointment
-    ) {
-      return appointment.date >= date && isActiveAppointment(appointment);
-    });
+      const upcomingAppointments = clientAppointments.filter(function (
+        appointment
+      ) {
+        return appointment.date >= date && isActiveAppointment(appointment);
+      });
 
-    const pastAppointments = clientAppointments.filter(function (appointment) {
-      return appointment.date < date || appointment.status === "completed";
-    });
+      const pastAppointments = clientAppointments.filter(function (appointment) {
+        return appointment.date < date || appointment.status === "completed";
+      });
 
-    const waitlistEntries = db.waitlist.filter(function (entry) {
-      return entry.clientId === req.user.id;
-    });
+      const waitlistEntries = db.waitlist.filter(function (entry) {
+        return entry.clientId === req.user.id;
+      });
 
-    return res.json({
-  success: true,
-  date,
-  summary: {
-    upcomingAppointments: upcomingAppointments.length,
-    pastAppointments: pastAppointments.length,
-    activeWaitlist: waitlistEntries.filter(function (entry) {
-      return entry.status === "active";
-    }).length
-  },
-  upcomingAppointments: getAppointmentList(db, upcomingAppointments, 10),
-  pastAppointments: getAppointmentList(db, pastAppointments, 10),
-  waitlist: waitlistEntries.map(function (entry) {
-    return waitlistSummary(entry, db);
-  })
-});
+      return res.json({
+        success: true,
+        date,
+        summary: {
+          upcomingAppointments: upcomingAppointments.length,
+          pastAppointments: pastAppointments.length,
+          activeWaitlist: waitlistEntries.filter(function (entry) {
+            return entry.status === "active";
+          }).length
+        },
+        upcomingAppointments: getAppointmentList(db, upcomingAppointments, 10),
+        pastAppointments: getAppointmentList(db, pastAppointments, 10),
+        waitlist: waitlistEntries.map(function (entry) {
+          return waitlistSummary(entry, db);
+        })
+      });
+    } catch (error) {
+      console.error("Client dashboard error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load client dashboard"
+      });
+    }
   }
 );
 

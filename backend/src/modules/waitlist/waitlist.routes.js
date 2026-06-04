@@ -1,7 +1,10 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
+
 const {
   authMiddleware,
   allowRoles
@@ -31,6 +34,50 @@ const updateWaitlistStatusSchema = z.object({
   notes: z.string().max(1000).optional()
 });
 
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
+}
+
+function serializePrismaRecord(record) {
+  const output = {};
+
+  Object.keys(record).forEach(function (key) {
+    output[key] = toIso(record[key]);
+  });
+
+  return output;
+}
+
+async function loadWaitlistSnapshot() {
+  const [users, services, locations, therapists, waitlist] = await Promise.all([
+    prisma.user.findMany(),
+    prisma.service.findMany(),
+    prisma.location.findMany(),
+    prisma.therapist.findMany(),
+    prisma.waitlist.findMany()
+  ]);
+
+  return {
+    users: users.map(serializePrismaRecord),
+    services: services.map(serializePrismaRecord),
+    locations: locations.map(serializePrismaRecord),
+    therapists: therapists.map(serializePrismaRecord),
+    waitlist: waitlist.map(serializePrismaRecord)
+  };
+}
+
 function sanitizeWaitlistEntry(entry, db) {
   const client = db.users.find(function (user) {
     return user.id === entry.clientId;
@@ -50,8 +97,8 @@ function sanitizeWaitlistEntry(entry, db) {
 
   const therapistUser = therapist
     ? db.users.find(function (user) {
-        return user.id === therapist.userId;
-      })
+      return user.id === therapist.userId;
+    })
     : null;
 
   return {
@@ -99,115 +146,202 @@ function getActiveLocation(db, locationId) {
   });
 }
 
+function waitlistToJson(entry) {
+  return {
+    id: entry.id,
+    clientId: entry.clientId,
+    serviceId: entry.serviceId,
+    locationId: entry.locationId,
+    appointmentType: entry.appointmentType,
+    preferredDate: entry.preferredDate,
+    preferredStartTime: entry.preferredStartTime || "",
+    preferredEndTime: entry.preferredEndTime || "",
+    therapistId: entry.therapistId || null,
+    status: entry.status || "active",
+    notes: entry.notes || "",
+    createdBy: entry.createdBy || "",
+    createdAt: toIso(entry.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(entry.updatedAt)
+  };
+}
+
+function upsertJsonWaitlist(entry) {
+  try {
+    const db = loadDB();
+
+    if (!db.waitlist) {
+      db.waitlist = [];
+    }
+
+    const existingIndex = db.waitlist.findIndex(function (item) {
+      return item.id === entry.id;
+    });
+
+    const jsonEntry = waitlistToJson(entry);
+
+    if (existingIndex >= 0) {
+      db.waitlist[existingIndex] = {
+        ...db.waitlist[existingIndex],
+        ...jsonEntry
+      };
+    } else {
+      db.waitlist.push(jsonEntry);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json waitlist sync failed:", error);
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || ""
+      }
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
+}
+
 // CREATE waitlist entry
 router.post(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
-    const result = createWaitlistSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = createWaitlistSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid waitlist input",
-        errors: result.error.flatten()
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid waitlist input",
+          errors: result.error.flatten()
+        });
+      }
+
+      const db = await loadWaitlistSnapshot();
+
+      let clientId = result.data.clientId;
+
+      if (req.user.role === USER_ROLES.CLIENT) {
+        clientId = req.user.id;
+      }
+
+      if (!clientId) {
+        return res.status(400).json({
+          success: false,
+          message: "clientId is required for admin or office manager"
+        });
+      }
+
+      const client = getActiveClient(db, clientId);
+
+      if (!client) {
+        return res.status(404).json({
+          success: false,
+          message: "Active client user not found"
+        });
+      }
+
+      const service = getActiveService(db, result.data.serviceId);
+
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Active service not found"
+        });
+      }
+
+      const location = getActiveLocation(db, result.data.locationId);
+
+      if (!location) {
+        return res.status(404).json({
+          success: false,
+          message: "Active location not found"
+        });
+      }
+
+      if (result.data.therapistId) {
+        const therapist = db.therapists.find(function (item) {
+          return item.id === result.data.therapistId;
+        });
+
+        if (!therapist || therapist.profileStatus !== "active") {
+          return res.status(404).json({
+            success: false,
+            message: "Active therapist profile not found"
+          });
+        }
+      }
+
+      const duplicate = await prisma.waitlist.findFirst({
+        where: {
+          clientId,
+          serviceId: result.data.serviceId,
+          locationId: result.data.locationId,
+          appointmentType: result.data.appointmentType,
+          preferredDate: result.data.preferredDate,
+          status: "active"
+        }
       });
-    }
 
-    const db = loadDB();
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message: "Client is already active on waitlist for this date/service/location"
+        });
+      }
 
-    let clientId = result.data.clientId;
-
-    if (req.user.role === USER_ROLES.CLIENT) {
-      clientId = req.user.id;
-    }
-
-    if (!clientId) {
-      return res.status(400).json({
-        success: false,
-        message: "clientId is required for admin or office manager"
+      const waitlistEntry = await prisma.waitlist.create({
+        data: {
+          id: createId("waitlist"),
+          clientId,
+          serviceId: result.data.serviceId,
+          locationId: result.data.locationId,
+          appointmentType: result.data.appointmentType,
+          preferredDate: result.data.preferredDate,
+          preferredStartTime: result.data.preferredStartTime || "",
+          preferredEndTime: result.data.preferredEndTime || "",
+          therapistId: result.data.therapistId || null,
+          status: "active",
+          notes: result.data.notes || "",
+          createdBy: req.user.email
+        }
       });
-    }
 
-    const client = getActiveClient(db, clientId);
+      upsertJsonWaitlist(waitlistEntry);
 
-    if (!client) {
-      return res.status(404).json({
-        success: false,
-        message: "Active client user not found"
-      });
-    }
-
-    const service = getActiveService(db, result.data.serviceId);
-
-    if (!service) {
-      return res.status(404).json({
-        success: false,
-        message: "Active service not found"
-      });
-    }
-
-    const location = getActiveLocation(db, result.data.locationId);
-
-    if (!location) {
-      return res.status(404).json({
-        success: false,
-        message: "Active location not found"
-      });
-    }
-
-    const duplicate = db.waitlist.find(function (entry) {
-      return (
-        entry.clientId === clientId &&
-        entry.serviceId === result.data.serviceId &&
-        entry.locationId === result.data.locationId &&
-        entry.appointmentType === result.data.appointmentType &&
-        entry.preferredDate === result.data.preferredDate &&
-        entry.status === "active"
+      await addPrismaAuditLog(
+        "WAITLIST_CREATED",
+        req.user.email,
+        `Waitlist entry created for client ${client.email}`
       );
-    });
 
-    if (duplicate) {
-      return res.status(400).json({
+      const responseDb = await loadWaitlistSnapshot();
+
+      return res.status(201).json({
+        success: true,
+        message: "Waitlist entry created successfully",
+        waitlist: sanitizeWaitlistEntry(
+          serializePrismaRecord(waitlistEntry),
+          responseDb
+        )
+      });
+    } catch (error) {
+      console.error("Create waitlist error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Client is already active on waitlist for this date/service/location"
+        message: "Failed to create waitlist entry"
       });
     }
-
-    const now = new Date().toISOString();
-
-    const waitlistEntry = {
-      id: Date.now().toString(),
-      clientId,
-      serviceId: result.data.serviceId,
-      locationId: result.data.locationId,
-      appointmentType: result.data.appointmentType,
-      preferredDate: result.data.preferredDate,
-      preferredStartTime: result.data.preferredStartTime || "",
-      preferredEndTime: result.data.preferredEndTime || "",
-      therapistId: result.data.therapistId || null,
-      status: "active",
-      notes: result.data.notes || "",
-      createdBy: req.user.email,
-      createdAt: now,
-      updatedAt: null
-    };
-
-    db.waitlist.push(waitlistEntry);
-    saveDB(db);
-
-    addAuditLog(
-      "WAITLIST_CREATED",
-      req.user.email,
-      `Waitlist entry created for client ${client.email}`
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Waitlist entry created successfully",
-      waitlist: sanitizeWaitlistEntry(waitlistEntry, db)
-    });
   }
 );
 
@@ -216,38 +350,48 @@ router.get(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const where = {};
 
-    let entries = db.waitlist;
+      if (req.query.status) {
+        where.status = req.query.status;
+      }
 
-    if (req.query.status) {
-      entries = entries.filter(function (entry) {
-        return entry.status === req.query.status;
+      if (req.query.date) {
+        where.preferredDate = req.query.date;
+      }
+
+      if (req.query.serviceId) {
+        where.serviceId = req.query.serviceId;
+      }
+
+      const entries = await prisma.waitlist.findMany({
+        where,
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
+
+      const db = await loadWaitlistSnapshot();
+
+      const waitlist = entries.map(function (entry) {
+        return sanitizeWaitlistEntry(serializePrismaRecord(entry), db);
+      });
+
+      return res.json({
+        success: true,
+        count: waitlist.length,
+        waitlist
+      });
+    } catch (error) {
+      console.error("Get waitlist error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load waitlist"
       });
     }
-
-    if (req.query.date) {
-      entries = entries.filter(function (entry) {
-        return entry.preferredDate === req.query.date;
-      });
-    }
-
-    if (req.query.serviceId) {
-      entries = entries.filter(function (entry) {
-        return entry.serviceId === req.query.serviceId;
-      });
-    }
-
-    const waitlist = entries.map(function (entry) {
-      return sanitizeWaitlistEntry(entry, db);
-    });
-
-    return res.json({
-      success: true,
-      count: waitlist.length,
-      waitlist
-    });
   }
 );
 
@@ -256,22 +400,36 @@ router.get(
   "/me",
   authMiddleware,
   allowRoles(USER_ROLES.CLIENT),
-  function (req, res) {
-    const db = loadDB();
-
-    const waitlist = db.waitlist
-      .filter(function (entry) {
-        return entry.clientId === req.user.id;
-      })
-      .map(function (entry) {
-        return sanitizeWaitlistEntry(entry, db);
+  async function (req, res) {
+    try {
+      const entries = await prisma.waitlist.findMany({
+        where: {
+          clientId: req.user.id
+        },
+        orderBy: {
+          createdAt: "desc"
+        }
       });
 
-    return res.json({
-      success: true,
-      count: waitlist.length,
-      waitlist
-    });
+      const db = await loadWaitlistSnapshot();
+
+      const waitlist = entries.map(function (entry) {
+        return sanitizeWaitlistEntry(serializePrismaRecord(entry), db);
+      });
+
+      return res.json({
+        success: true,
+        count: waitlist.length,
+        waitlist
+      });
+    } catch (error) {
+      console.error("Get my waitlist error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load your waitlist entries"
+      });
+    }
   }
 );
 
@@ -280,40 +438,52 @@ router.get(
   "/matches",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const serviceId = req.query.serviceId;
+      const locationId = req.query.locationId;
+      const appointmentType = req.query.appointmentType;
+      const date = req.query.date;
 
-    const serviceId = req.query.serviceId;
-    const locationId = req.query.locationId;
-    const appointmentType = req.query.appointmentType;
-    const date = req.query.date;
+      if (!serviceId || !locationId || !appointmentType || !date) {
+        return res.status(400).json({
+          success: false,
+          message: "serviceId, locationId, appointmentType, and date are required"
+        });
+      }
 
-    if (!serviceId || !locationId || !appointmentType || !date) {
-      return res.status(400).json({
+      const entries = await prisma.waitlist.findMany({
+        where: {
+          status: "active",
+          serviceId,
+          locationId,
+          appointmentType,
+          preferredDate: date
+        },
+        orderBy: {
+          createdAt: "asc"
+        }
+      });
+
+      const db = await loadWaitlistSnapshot();
+
+      const matches = entries.map(function (entry) {
+        return sanitizeWaitlistEntry(serializePrismaRecord(entry), db);
+      });
+
+      return res.json({
+        success: true,
+        count: matches.length,
+        matches
+      });
+    } catch (error) {
+      console.error("Get matching waitlist error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "serviceId, locationId, appointmentType, and date are required"
+        message: "Failed to load matching waitlist entries"
       });
     }
-
-    const matches = db.waitlist
-      .filter(function (entry) {
-        return (
-          entry.status === "active" &&
-          entry.serviceId === serviceId &&
-          entry.locationId === locationId &&
-          entry.appointmentType === appointmentType &&
-          entry.preferredDate === date
-        );
-      })
-      .map(function (entry) {
-        return sanitizeWaitlistEntry(entry, db);
-      });
-
-    return res.json({
-      success: true,
-      count: matches.length,
-      matches
-    });
   }
 );
 
@@ -322,67 +492,82 @@ router.patch(
   "/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
-    const result = updateWaitlistStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateWaitlistStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid waitlist status",
+          errors: result.error.flatten()
+        });
+      }
+
+      const entry = await prisma.waitlist.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
+
+      if (!entry) {
+        return res.status(404).json({
+          success: false,
+          message: "Waitlist entry not found"
+        });
+      }
+
+      if (req.user.role === USER_ROLES.CLIENT && entry.clientId !== req.user.id) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only update your own waitlist entry"
+        });
+      }
+
+      if (
+        req.user.role === USER_ROLES.CLIENT &&
+        result.data.status !== "cancelled"
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "Client can only cancel their waitlist entry"
+        });
+      }
+
+      const updatedEntry = await prisma.waitlist.update({
+        where: {
+          id: entry.id
+        },
+        data: {
+          status: result.data.status,
+          notes: result.data.notes || entry.notes || "",
+          updatedAt: new Date()
+        }
+      });
+
+      upsertJsonWaitlist(updatedEntry);
+
+      await addPrismaAuditLog(
+        "WAITLIST_STATUS_UPDATED",
+        req.user.email,
+        `Waitlist entry ${updatedEntry.id} changed to ${updatedEntry.status}`
+      );
+
+      const db = await loadWaitlistSnapshot();
+
+      return res.json({
+        success: true,
+        message: "Waitlist status updated successfully",
+        waitlist: sanitizeWaitlistEntry(serializePrismaRecord(updatedEntry), db)
+      });
+    } catch (error) {
+      console.error("Update waitlist status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid waitlist status",
-        errors: result.error.flatten()
+        message: "Failed to update waitlist status"
       });
     }
-
-    const db = loadDB();
-
-    const entry = db.waitlist.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!entry) {
-      return res.status(404).json({
-        success: false,
-        message: "Waitlist entry not found"
-      });
-    }
-
-    if (req.user.role === USER_ROLES.CLIENT && entry.clientId !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only update your own waitlist entry"
-      });
-    }
-
-    if (
-      req.user.role === USER_ROLES.CLIENT &&
-      result.data.status !== "cancelled"
-    ) {
-      return res.status(403).json({
-        success: false,
-        message: "Client can only cancel their waitlist entry"
-      });
-    }
-
-    entry.status = result.data.status;
-    entry.updatedAt = new Date().toISOString();
-
-    if (result.data.notes) {
-      entry.notes = result.data.notes;
-    }
-
-    saveDB(db);
-
-    addAuditLog(
-      "WAITLIST_STATUS_UPDATED",
-      req.user.email,
-      `Waitlist entry ${entry.id} changed to ${entry.status}`
-    );
-
-    return res.json({
-      success: true,
-      message: "Waitlist status updated successfully",
-      waitlist: sanitizeWaitlistEntry(entry, db)
-    });
   }
 );
 
