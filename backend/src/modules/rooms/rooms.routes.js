@@ -1,7 +1,10 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
+
 const {
   authMiddleware,
   allowRoles
@@ -21,25 +24,27 @@ const updateRoomStatusSchema = z.object({
   status: z.enum(["active", "inactive", "archived"])
 });
 
-function ensureRooms(db) {
-  if (!db.rooms) {
-    db.rooms = [];
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
   }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
 }
 
-function getLocation(db, locationId) {
-  return db.locations.find(function (location) {
-    return location.id === locationId;
-  });
-}
-
-function sanitizeRoom(room, db) {
-  const location = getLocation(db, room.locationId);
-
+function sanitizeRoom(room) {
   return {
     id: room.id,
     locationId: room.locationId,
-    locationName: location ? location.name : null,
+    locationName: room.location ? room.location.name : null,
     name: room.name,
     status: room.status,
     notes: room.notes || "",
@@ -48,32 +53,133 @@ function sanitizeRoom(room, db) {
   };
 }
 
+function roomToJson(room) {
+  return {
+    id: room.id,
+    locationId: room.locationId,
+    name: room.name,
+    status: room.status || "active",
+    notes: room.notes || "",
+    createdAt: toIso(room.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(room.updatedAt)
+  };
+}
+
+function upsertJsonRoom(room) {
+  try {
+    const db = loadDB();
+
+    if (!db.rooms) {
+      db.rooms = [];
+    }
+
+    const existingIndex = db.rooms.findIndex(function (item) {
+      return item.id === room.id;
+    });
+
+    const jsonRoom = roomToJson(room);
+
+    if (existingIndex >= 0) {
+      db.rooms[existingIndex] = {
+        ...db.rooms[existingIndex],
+        ...jsonRoom
+      };
+    } else {
+      db.rooms.push(jsonRoom);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json room sync failed:", error);
+  }
+}
+
+function deleteJsonRoom(roomId) {
+  try {
+    const db = loadDB();
+
+    if (!db.rooms) {
+      return;
+    }
+
+    db.rooms = db.rooms.filter(function (room) {
+      return room.id !== roomId;
+    });
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json room delete failed:", error);
+  }
+}
+
+function isRoomUsedInJsonAppointments(roomId) {
+  try {
+    const db = loadDB();
+
+    return (db.appointments || []).some(function (appointment) {
+      return appointment.roomId === roomId;
+    });
+  } catch (error) {
+    console.error("Temporary db.json appointment room check failed:", error);
+    return false;
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || ""
+      }
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
+}
+
 // GET all rooms
 router.get(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
-    ensureRooms(db);
+  async function (req, res) {
+    try {
+      const where = {};
 
-    let rooms = db.rooms;
+      if (req.query.locationId) {
+        where.locationId = req.query.locationId;
+      }
 
-    if (req.query.locationId) {
-      rooms = rooms.filter(function (room) {
-        return room.locationId === req.query.locationId;
+      const rooms = await prisma.room.findMany({
+        where,
+        include: {
+          location: true
+        },
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
+
+      const result = rooms.map(function (room) {
+        return sanitizeRoom(room);
+      });
+
+      return res.json({
+        success: true,
+        count: result.length,
+        rooms: result
+      });
+    } catch (error) {
+      console.error("Get rooms error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load rooms"
       });
     }
-
-    const result = rooms.map(function (room) {
-      return sanitizeRoom(room, db);
-    });
-
-    return res.json({
-      success: true,
-      count: result.length,
-      rooms: result
-    });
   }
 );
 
@@ -82,69 +188,83 @@ router.post(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = createRoomSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = createRoomSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten()
+        });
+      }
+
+      const location = await prisma.location.findUnique({
+        where: {
+          id: result.data.locationId
+        }
       });
-    }
 
-    const db = loadDB();
-    ensureRooms(db);
+      if (!location || location.status !== "active") {
+        return res.status(404).json({
+          success: false,
+          message: "Active location not found"
+        });
+      }
 
-    const location = getLocation(db, result.data.locationId);
-
-    if (!location || location.status !== "active") {
-      return res.status(404).json({
-        success: false,
-        message: "Active location not found"
+      const existingRooms = await prisma.room.findMany({
+        where: {
+          locationId: result.data.locationId
+        }
       });
-    }
 
-    const duplicateRoom = db.rooms.find(function (room) {
-      return (
-        room.locationId === result.data.locationId &&
-        room.name.toLowerCase() === result.data.name.toLowerCase()
+      const duplicateRoom = existingRooms.find(function (room) {
+        return room.name.toLowerCase() === result.data.name.toLowerCase();
+      });
+
+      if (duplicateRoom) {
+        return res.status(400).json({
+          success: false,
+          message: "Room already exists for this location"
+        });
+      }
+
+      const room = await prisma.room.create({
+        data: {
+          id: createId("room"),
+          locationId: result.data.locationId,
+          name: result.data.name,
+          status: "active",
+          notes: result.data.notes || ""
+        },
+        include: {
+          location: true
+        }
+      });
+
+      // Temporary sync while appointments/availability still use db.json
+      upsertJsonRoom(room);
+
+      await addPrismaAuditLog(
+        "ROOM_CREATED",
+        req.user.email,
+        `Room ${room.name} created for location ${location.name}`
       );
-    });
 
-    if (duplicateRoom) {
-      return res.status(400).json({
+      return res.status(201).json({
+        success: true,
+        message: "Room created successfully",
+        room: sanitizeRoom(room)
+      });
+    } catch (error) {
+      console.error("Create room error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Room already exists for this location"
+        message: "Failed to create room"
       });
     }
-
-    const now = new Date().toISOString();
-
-    const room = {
-      id: Date.now().toString(),
-      locationId: result.data.locationId,
-      name: result.data.name,
-      status: "active",
-      notes: result.data.notes || "",
-      createdAt: now,
-      updatedAt: null
-    };
-
-    db.rooms.push(room);
-    saveDB(db);
-
-    addAuditLog(
-      "ROOM_CREATED",
-      req.user.email,
-      `Room ${room.name} created for location ${location.name}`
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Room created successfully",
-      room: sanitizeRoom(room, db)
-    });
   }
 );
 
@@ -153,47 +273,66 @@ router.patch(
   "/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateRoomStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateRoomStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+          errors: result.error.flatten()
+        });
+      }
+
+      const room = await prisma.room.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
+
+      if (!room) {
+        return res.status(404).json({
+          success: false,
+          message: "Room not found"
+        });
+      }
+
+      const updatedRoom = await prisma.room.update({
+        where: {
+          id: room.id
+        },
+        data: {
+          status: result.data.status,
+          updatedAt: new Date()
+        },
+        include: {
+          location: true
+        }
+      });
+
+      // Temporary sync while appointments/availability still use db.json
+      upsertJsonRoom(updatedRoom);
+
+      await addPrismaAuditLog(
+        "ROOM_STATUS_UPDATED",
+        req.user.email,
+        `Room ${updatedRoom.id} status changed to ${updatedRoom.status}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Room status updated successfully",
+        room: sanitizeRoom(updatedRoom)
+      });
+    } catch (error) {
+      console.error("Update room status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid status",
-        errors: result.error.flatten()
+        message: "Failed to update room status"
       });
     }
-
-    const db = loadDB();
-    ensureRooms(db);
-
-    const room = db.rooms.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!room) {
-      return res.status(404).json({
-        success: false,
-        message: "Room not found"
-      });
-    }
-
-    room.status = result.data.status;
-    room.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    addAuditLog(
-      "ROOM_STATUS_UPDATED",
-      req.user.email,
-      `Room ${room.id} status changed to ${room.status}`
-    );
-
-    return res.json({
-      success: true,
-      message: "Room status updated successfully",
-      room: sanitizeRoom(room, db)
-    });
   }
 );
 
@@ -202,50 +341,71 @@ router.delete(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
-    ensureRooms(db);
+  async function (req, res) {
+    try {
+      const room = await prisma.room.findUnique({
+        where: {
+          id: req.params.id
+        },
+        include: {
+          location: true
+        }
+      });
 
-    const roomIndex = db.rooms.findIndex(function (room) {
-      return room.id === req.params.id;
-    });
+      if (!room) {
+        return res.status(404).json({
+          success: false,
+          message: "Room not found"
+        });
+      }
 
-    if (roomIndex === -1) {
-      return res.status(404).json({
+      const appointmentCount = await prisma.appointment.count({
+        where: {
+          roomId: room.id
+        }
+      });
+
+      const isUsedInJson = isRoomUsedInJsonAppointments(room.id);
+
+      if (appointmentCount > 0 || isUsedInJson) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This room is already used in appointments. Archive it instead of deleting."
+        });
+      }
+
+      const deletedRoom = await prisma.room.delete({
+        where: {
+          id: room.id
+        },
+        include: {
+          location: true
+        }
+      });
+
+      // Temporary sync while appointments/availability still use db.json
+      deleteJsonRoom(deletedRoom.id);
+
+      await addPrismaAuditLog(
+        "ROOM_DELETED",
+        req.user.email,
+        `Room ${deletedRoom.name} deleted`
+      );
+
+      return res.json({
+        success: true,
+        message: "Room deleted successfully",
+        room: sanitizeRoom(deletedRoom)
+      });
+    } catch (error) {
+      console.error("Delete room error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Room not found"
+        message: "Failed to delete room"
       });
     }
-
-    const isUsedInAppointments = (db.appointments || []).some(function (
-      appointment
-    ) {
-      return appointment.roomId === req.params.id;
-    });
-
-    if (isUsedInAppointments) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "This room is already used in appointments. Archive it instead of deleting."
-      });
-    }
-
-    const deletedRoom = db.rooms.splice(roomIndex, 1)[0];
-
-    saveDB(db);
-
-    addAuditLog(
-      "ROOM_DELETED",
-      req.user.email,
-      `Room ${deletedRoom.name} deleted`
-    );
-
-    return res.json({
-      success: true,
-      message: "Room deleted successfully",
-      room: deletedRoom
-    });
   }
 );
 

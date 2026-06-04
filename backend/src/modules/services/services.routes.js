@@ -1,7 +1,10 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
+
 const {
   authMiddleware,
   allowRoles
@@ -52,12 +55,28 @@ const updateStatusSchema = z.object({
   status: z.enum(["active", "inactive", "archived"])
 });
 
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
 function createSlug(name) {
   return String(name || "")
     .toLowerCase()
     .trim()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/(^-|-$)/g, "");
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
 }
 
 function sanitizeService(service) {
@@ -87,26 +106,118 @@ function sanitizeService(service) {
   };
 }
 
-// GET public active services
-router.get("/public", function (req, res) {
-  const db = loadDB();
+function serviceToJson(service) {
+  return {
+    id: service.id,
+    name: service.name,
+    slug: service.slug,
+    category: service.category,
+    description: service.description || "",
+    durationMinutes: service.durationMinutes,
+    bufferBeforeMinutes: service.bufferBeforeMinutes || 0,
+    bufferAfterMinutes: service.bufferAfterMinutes || 0,
+    currentPrice: service.currentPrice,
+    currency: service.currency || "USD",
+    appointmentTypes: service.appointmentTypes || [],
+    allowedLocations: service.allowedLocations || [],
+    isPublicBookingEnabled: service.isPublicBookingEnabled || false,
+    requiresCardOnFile: service.requiresCardOnFile || false,
+    cancellationPolicy: service.cancellationPolicy || "",
+    status: service.status || "active",
+    priceHistory: service.priceHistory || [],
+    createdAt: toIso(service.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(service.updatedAt)
+  };
+}
 
-  const services = db.services
-    .filter(function (service) {
-      return (
-        service.status === "active" &&
-        service.isPublicBookingEnabled === true
-      );
-    })
-    .map(function (service) {
-      return sanitizeService(service);
+function upsertJsonService(service) {
+  try {
+    const db = loadDB();
+
+    if (!db.services) {
+      db.services = [];
+    }
+
+    const existingIndex = db.services.findIndex(function (item) {
+      return item.id === service.id;
     });
 
-  return res.json({
-    success: true,
-    count: services.length,
-    services
-  });
+    const jsonService = serviceToJson(service);
+
+    if (existingIndex >= 0) {
+      db.services[existingIndex] = {
+        ...db.services[existingIndex],
+        ...jsonService
+      };
+    } else {
+      db.services.push(jsonService);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json service sync failed:", error);
+  }
+}
+
+function deleteJsonService(serviceId) {
+  try {
+    const db = loadDB();
+
+    if (!db.services) {
+      return;
+    }
+
+    db.services = db.services.filter(function (service) {
+      return service.id !== serviceId;
+    });
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json service delete failed:", error);
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || ""
+      }
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
+}
+
+// GET public active services
+router.get("/public", async function (req, res) {
+  try {
+    const services = await prisma.service.findMany({
+      where: {
+        status: "active",
+        isPublicBookingEnabled: true
+      },
+      orderBy: {
+        createdAt: "desc"
+      }
+    });
+
+    return res.json({
+      success: true,
+      count: services.length,
+      services: services.map(sanitizeService)
+    });
+  } catch (error) {
+    console.error("Get public services error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Failed to load public services"
+    });
+  }
 });
 
 // GET all services
@@ -114,18 +225,27 @@ router.get(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const services = await prisma.service.findMany({
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
 
-    const services = db.services.map(function (service) {
-      return sanitizeService(service);
-    });
+      return res.json({
+        success: true,
+        count: services.length,
+        services: services.map(sanitizeService)
+      });
+    } catch (error) {
+      console.error("Get services error:", error);
 
-    return res.json({
-      success: true,
-      count: services.length,
-      services
-    });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load services"
+      });
+    }
   }
 );
 
@@ -134,25 +254,34 @@ router.get(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
 
-    const service = db.services.find(function (item) {
-      return item.id === req.params.id;
-    });
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
+      }
 
-    if (!service) {
-      return res.status(404).json({
+      return res.json({
+        success: true,
+        service: sanitizeService(service),
+        priceHistory: service.priceHistory || []
+      });
+    } catch (error) {
+      console.error("Get single service error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Service not found"
+        message: "Failed to load service"
       });
     }
-
-    return res.json({
-      success: true,
-      service: sanitizeService(service),
-      priceHistory: service.priceHistory || []
-    });
   }
 );
 
@@ -161,78 +290,89 @@ router.post(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = createServiceSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = createServiceSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten()
+        });
+      }
+
+      const slug = createSlug(result.data.name);
+
+      const duplicate = await prisma.service.findFirst({
+        where: {
+          slug
+        }
       });
-    }
 
-    const db = loadDB();
+      if (duplicate) {
+        return res.status(400).json({
+          success: false,
+          message: "Service with this name already exists"
+        });
+      }
 
-    const slug = createSlug(result.data.name);
+      const now = new Date();
 
-    const duplicate = db.services.find(function (service) {
-      return service.slug === slug;
-    });
-
-    if (duplicate) {
-      return res.status(400).json({
-        success: false,
-        message: "Service with this name already exists"
-      });
-    }
-
-    const now = new Date().toISOString();
-
-    const service = {
-      id: Date.now().toString(),
-      name: result.data.name,
-      slug,
-      category: result.data.category,
-      description: result.data.description || "",
-      durationMinutes: result.data.durationMinutes,
-      bufferBeforeMinutes: result.data.bufferBeforeMinutes || 0,
-      bufferAfterMinutes: result.data.bufferAfterMinutes || 0,
-      currentPrice: result.data.price,
-      currency: result.data.currency || "USD",
-      appointmentTypes: result.data.appointmentTypes || [],
-      allowedLocations: result.data.allowedLocations || [],
-      isPublicBookingEnabled: result.data.isPublicBookingEnabled || false,
-      requiresCardOnFile: result.data.requiresCardOnFile || false,
-      cancellationPolicy: result.data.cancellationPolicy || "",
-      status: "active",
-      priceHistory: [
+      const priceHistory = [
         {
           price: result.data.price,
           currency: result.data.currency || "USD",
-          effectiveAt: now,
+          effectiveAt: now.toISOString(),
           changedBy: req.user.email,
           reason: "Initial service price"
         }
-      ],
-      createdAt: now,
-      updatedAt: null
-    };
+      ];
 
-    db.services.push(service);
-    saveDB(db);
+      const service = await prisma.service.create({
+        data: {
+          id: createId("service"),
+          name: result.data.name,
+          slug,
+          category: result.data.category,
+          description: result.data.description || "",
+          durationMinutes: result.data.durationMinutes,
+          bufferBeforeMinutes: result.data.bufferBeforeMinutes || 0,
+          bufferAfterMinutes: result.data.bufferAfterMinutes || 0,
+          currentPrice: result.data.price,
+          currency: result.data.currency || "USD",
+          appointmentTypes: result.data.appointmentTypes || [],
+          allowedLocations: result.data.allowedLocations || [],
+          isPublicBookingEnabled: result.data.isPublicBookingEnabled || false,
+          requiresCardOnFile: result.data.requiresCardOnFile || false,
+          cancellationPolicy: result.data.cancellationPolicy || "",
+          status: "active",
+          priceHistory
+        }
+      });
 
-    addAuditLog(
-      "SERVICE_CREATED",
-      req.user.email,
-      `Created service: ${service.name}`
-    );
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonService(service);
 
-    return res.status(201).json({
-      success: true,
-      message: "Service created successfully",
-      service: sanitizeService(service)
-    });
+      await addPrismaAuditLog(
+        "SERVICE_CREATED",
+        req.user.email,
+        `Created service: ${service.name}`
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Service created successfully",
+        service: sanitizeService(service)
+      });
+    } catch (error) {
+      console.error("Create service error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to create service"
+      });
+    }
   }
 );
 
@@ -241,82 +381,106 @@ router.patch(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateServiceSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateServiceSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
-      });
-    }
-
-    const db = loadDB();
-
-    const service = db.services.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!service) {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found"
-      });
-    }
-
-    if (result.data.name) {
-      const newSlug = createSlug(result.data.name);
-
-      const duplicate = db.services.find(function (item) {
-        return item.slug === newSlug && item.id !== service.id;
-      });
-
-      if (duplicate) {
+      if (!result.success) {
         return res.status(400).json({
           success: false,
-          message: "Another service with this name already exists"
+          message: "Invalid input",
+          errors: result.error.flatten()
         });
       }
 
-      service.name = result.data.name;
-      service.slug = newSlug;
-    }
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
 
-    const allowedFields = [
-      "category",
-      "description",
-      "durationMinutes",
-      "bufferBeforeMinutes",
-      "bufferAfterMinutes",
-      "appointmentTypes",
-      "allowedLocations",
-      "isPublicBookingEnabled",
-      "requiresCardOnFile",
-      "cancellationPolicy"
-    ];
-
-    allowedFields.forEach(function (field) {
-      if (Object.prototype.hasOwnProperty.call(result.data, field)) {
-        service[field] = result.data[field];
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
       }
-    });
 
-    service.updatedAt = new Date().toISOString();
+      const updateData = {};
 
-    saveDB(db);
+      if (result.data.name) {
+        const newSlug = createSlug(result.data.name);
 
-    addAuditLog(
-      "SERVICE_UPDATED",
-      req.user.email,
-      `Updated service: ${service.name}`
-    );
+        const duplicate = await prisma.service.findFirst({
+          where: {
+            slug: newSlug,
+            NOT: {
+              id: service.id
+            }
+          }
+        });
 
-    return res.json({
-      success: true,
-      message: "Service updated successfully",
-      service: sanitizeService(service)
-    });
+        if (duplicate) {
+          return res.status(400).json({
+            success: false,
+            message: "Another service with this name already exists"
+          });
+        }
+
+        updateData.name = result.data.name;
+        updateData.slug = newSlug;
+      }
+
+      const allowedFields = [
+        "category",
+        "description",
+        "durationMinutes",
+        "bufferBeforeMinutes",
+        "bufferAfterMinutes",
+        "appointmentTypes",
+        "allowedLocations",
+        "isPublicBookingEnabled",
+        "requiresCardOnFile",
+        "cancellationPolicy"
+      ];
+
+      allowedFields.forEach(function (field) {
+        if (Object.prototype.hasOwnProperty.call(result.data, field)) {
+          updateData[field] = result.data[field];
+        }
+      });
+
+      updateData.updatedAt = new Date();
+
+      const updatedService = await prisma.service.update({
+        where: {
+          id: service.id
+        },
+        data: updateData
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonService(updatedService);
+
+      await addPrismaAuditLog(
+        "SERVICE_UPDATED",
+        req.user.email,
+        `Updated service: ${updatedService.name}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Service updated successfully",
+        service: sanitizeService(updatedService)
+      });
+    } catch (error) {
+      console.error("Update service error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update service"
+      });
+    }
   }
 );
 
@@ -325,63 +489,83 @@ router.patch(
   "/:id/price",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updatePriceSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updatePriceSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid price input",
+          errors: result.error.flatten()
+        });
+      }
+
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
+
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
+      }
+
+      const oldPrice = service.currentPrice;
+      const oldCurrency = service.currency;
+
+      const priceHistory = Array.isArray(service.priceHistory)
+        ? [...service.priceHistory]
+        : [];
+
+      priceHistory.push({
+        oldPrice,
+        oldCurrency,
+        price: result.data.price,
+        currency: result.data.currency || service.currency || "USD",
+        effectiveAt: new Date().toISOString(),
+        changedBy: req.user.email,
+        reason: result.data.reason || "Price updated"
+      });
+
+      const updatedService = await prisma.service.update({
+        where: {
+          id: service.id
+        },
+        data: {
+          currentPrice: result.data.price,
+          currency: result.data.currency || service.currency || "USD",
+          priceHistory,
+          updatedAt: new Date()
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonService(updatedService);
+
+      await addPrismaAuditLog(
+        "SERVICE_PRICE_UPDATED",
+        req.user.email,
+        `Changed price for ${updatedService.name} from ${oldPrice} to ${updatedService.currentPrice}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Service price updated successfully",
+        service: sanitizeService(updatedService),
+        priceHistory: updatedService.priceHistory || []
+      });
+    } catch (error) {
+      console.error("Update service price error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid price input",
-        errors: result.error.flatten()
+        message: "Failed to update service price"
       });
     }
-
-    const db = loadDB();
-
-    const service = db.services.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!service) {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found"
-      });
-    }
-
-    const oldPrice = service.currentPrice;
-    const oldCurrency = service.currency;
-
-    service.currentPrice = result.data.price;
-    service.currency = result.data.currency || service.currency || "USD";
-    service.updatedAt = new Date().toISOString();
-
-    if (!service.priceHistory) service.priceHistory = [];
-
-    service.priceHistory.push({
-      oldPrice,
-      oldCurrency,
-      price: service.currentPrice,
-      currency: service.currency,
-      effectiveAt: new Date().toISOString(),
-      changedBy: req.user.email,
-      reason: result.data.reason || "Price updated"
-    });
-
-    saveDB(db);
-
-    addAuditLog(
-      "SERVICE_PRICE_UPDATED",
-      req.user.email,
-      `Changed price for ${service.name} from ${oldPrice} to ${service.currentPrice}`
-    );
-
-    return res.json({
-      success: true,
-      message: "Service price updated successfully",
-      service: sanitizeService(service),
-      priceHistory: service.priceHistory
-    });
   }
 );
 
@@ -390,46 +574,63 @@ router.patch(
   "/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+          errors: result.error.flatten()
+        });
+      }
+
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
+
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
+      }
+
+      const updatedService = await prisma.service.update({
+        where: {
+          id: service.id
+        },
+        data: {
+          status: result.data.status,
+          updatedAt: new Date()
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonService(updatedService);
+
+      await addPrismaAuditLog(
+        "SERVICE_STATUS_UPDATED",
+        req.user.email,
+        `Changed ${updatedService.name} status to ${updatedService.status}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Service status updated successfully",
+        service: sanitizeService(updatedService)
+      });
+    } catch (error) {
+      console.error("Update service status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid status",
-        errors: result.error.flatten()
+        message: "Failed to update service status"
       });
     }
-
-    const db = loadDB();
-
-    const service = db.services.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!service) {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found"
-      });
-    }
-
-    service.status = result.data.status;
-    service.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    addAuditLog(
-      "SERVICE_STATUS_UPDATED",
-      req.user.email,
-      `Changed ${service.name} status to ${service.status}`
-    );
-
-    return res.json({
-      success: true,
-      message: "Service status updated successfully",
-      service: sanitizeService(service)
-    });
   }
 );
 
@@ -438,32 +639,49 @@ router.patch(
   "/:id/public",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
 
-    const service = db.services.find(function (item) {
-      return item.id === req.params.id;
-    });
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
+      }
 
-    if (!service) {
-      return res.status(404).json({
+      const updatedService = await prisma.service.update({
+        where: {
+          id: service.id
+        },
+        data: {
+          isPublicBookingEnabled: Boolean(req.body.isPublicBookingEnabled),
+          updatedAt: new Date()
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonService(updatedService);
+
+      return res.json({
+        success: true,
+        message: updatedService.isPublicBookingEnabled
+          ? "Service is now public"
+          : "Service is now hidden from clients",
+        service: sanitizeService(updatedService)
+      });
+    } catch (error) {
+      console.error("Update service public visibility error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Service not found"
+        message: "Failed to update service visibility"
       });
     }
-
-    service.isPublicBookingEnabled = Boolean(req.body.isPublicBookingEnabled);
-    service.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    return res.json({
-      success: true,
-      message: service.isPublicBookingEnabled
-        ? "Service is now public"
-        : "Service is now hidden from clients",
-      service
-    });
   }
 );
 
@@ -472,57 +690,83 @@ router.delete(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
-
-    const serviceIndex = db.services.findIndex(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (serviceIndex === -1) {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found"
+  async function (req, res) {
+    try {
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.id
+        }
       });
-    }
 
-    const isUsedInAppointments = (db.appointments || []).some(function (
-      appointment
-    ) {
-      return appointment.serviceId === req.params.id;
-    });
-
-    const isUsedInWaitlist = (db.waitlist || []).some(function (entry) {
-      return entry.serviceId === req.params.id;
-    });
-
-    const isUsedInTherapistServices = (db.therapistServices || []).some(
-      function (assignment) {
-        return assignment.serviceId === req.params.id;
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
       }
-    );
 
-    if (
-      isUsedInAppointments ||
-      isUsedInWaitlist ||
-      isUsedInTherapistServices
-    ) {
-      return res.status(400).json({
+      const [
+        appointmentCount,
+        waitlistCount,
+        therapistServiceCount
+      ] = await Promise.all([
+        prisma.appointment.count({
+          where: {
+            serviceId: service.id
+          }
+        }),
+        prisma.waitlist.count({
+          where: {
+            serviceId: service.id
+          }
+        }),
+        prisma.therapistService.count({
+          where: {
+            serviceId: service.id
+          }
+        })
+      ]);
+
+      if (
+        appointmentCount > 0 ||
+        waitlistCount > 0 ||
+        therapistServiceCount > 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This service is already used in appointments, waitlist, or therapist assignments. Archive it instead of deleting."
+        });
+      }
+
+      const deletedService = await prisma.service.delete({
+        where: {
+          id: service.id
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      deleteJsonService(deletedService.id);
+
+      await addPrismaAuditLog(
+        "SERVICE_DELETED",
+        req.user.email,
+        `Deleted service: ${deletedService.name}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Service deleted successfully",
+        service: sanitizeService(deletedService)
+      });
+    } catch (error) {
+      console.error("Delete service error:", error);
+
+      return res.status(500).json({
         success: false,
-        message:
-          "This service is already used in appointments, waitlist, or therapist assignments. Archive it instead of deleting."
+        message: "Failed to delete service"
       });
     }
-
-    const deletedService = db.services.splice(serviceIndex, 1)[0];
-
-    saveDB(db);
-
-    return res.json({
-      success: true,
-      message: "Service deleted successfully",
-      service: deletedService
-    });
   }
 );
 

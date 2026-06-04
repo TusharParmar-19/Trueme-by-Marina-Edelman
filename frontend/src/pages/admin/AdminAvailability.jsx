@@ -18,6 +18,40 @@ function getDayLabel(dayOfWeek) {
   return day ? day.label : dayOfWeek;
 }
 
+function normalizeTimeForApi(value) {
+  if (!value) {
+    return "";
+  }
+
+  const text = String(value).trim();
+
+  // Already correct 24-hour format: 09:00, 16:00
+  if (/^([01]\d|2[0-3]):([0-5]\d)$/.test(text)) {
+    return text;
+  }
+
+  // Convert 09:00 AM / 04:00 PM to 24-hour format
+  const match = text.match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+
+  if (!match) {
+    return text;
+  }
+
+  let hours = Number(match[1]);
+  const minutes = match[2];
+  const period = match[3].toUpperCase();
+
+  if (period === "PM" && hours !== 12) {
+    hours += 12;
+  }
+
+  if (period === "AM" && hours === 12) {
+    hours = 0;
+  }
+
+  return `${String(hours).padStart(2, "0")}:${minutes}`;
+}
+
 function getLocationType(location) {
   if (!location) {
     return "";
@@ -279,23 +313,31 @@ function AdminAvailability() {
     setMessage("");
 
     try {
+      const payload = {
+        dayOfWeek: Number(form.dayOfWeek),
+        locationId: form.locationId,
+        locationIds: [form.locationId],
+        startTime: normalizeTimeForApi(form.startTime),
+        endTime: normalizeTimeForApi(form.endTime),
+        appointmentTypes,
+        notes: form.notes,
+      };
+
+      console.log("Updating availability payload:", {
+        id: editingRule.id,
+        ...payload,
+      });
+
       await apiRequest(`/availability/weekly/${editingRule.id}`, {
         method: "PATCH",
-        body: JSON.stringify({
-          dayOfWeek: Number(form.dayOfWeek),
-          locationId: form.locationId,
-          locationIds: [form.locationId],
-          startTime: form.startTime,
-          endTime: form.endTime,
-          appointmentTypes,
-          notes: form.notes,
-        }),
+        body: JSON.stringify(payload),
       });
 
       setMessage("Availability updated successfully.");
       cancelEdit();
       await loadAvailability(selectedTherapistId);
     } catch (err) {
+      console.error("Update availability failed:", err);
       setError(err.message || "Something went wrong");
     } finally {
       setSaving(false);

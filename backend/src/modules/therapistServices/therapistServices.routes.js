@@ -1,7 +1,10 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
+
 const {
   authMiddleware,
   allowRoles
@@ -29,7 +32,27 @@ const updateStatusSchema = z.object({
   status: z.enum(["active", "inactive"])
 });
 
-function sanitizeAssignment(assignment, therapist, therapistUser, service) {
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
+}
+
+function sanitizeAssignment(assignment) {
+  const therapist = assignment.therapist || null;
+  const therapistUser = therapist && therapist.user ? therapist.user : null;
+  const service = assignment.service || null;
+
   return {
     id: assignment.id,
     therapistId: assignment.therapistId,
@@ -48,26 +71,77 @@ function sanitizeAssignment(assignment, therapist, therapistUser, service) {
   };
 }
 
-function getAssignmentDetails(db, assignment) {
-  const therapist = db.therapists.find(function (item) {
-    return item.id === assignment.therapistId;
-  });
+function assignmentToJson(assignment) {
+  return {
+    id: assignment.id,
+    therapistId: assignment.therapistId,
+    serviceId: assignment.serviceId,
+    locationIds: assignment.locationIds || [],
+    appointmentTypes: assignment.appointmentTypes || [],
+    notes: assignment.notes || "",
+    status: assignment.status || "active",
+    createdAt: toIso(assignment.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(assignment.updatedAt)
+  };
+}
 
-  const therapistUser = therapist
-    ? db.users.find(function (user) {
-      return user.id === therapist.userId;
-    })
-    : null;
+function upsertJsonAssignment(assignment) {
+  try {
+    const db = loadDB();
 
-  const service = db.services.find(function (item) {
-    return item.id === assignment.serviceId;
-  });
+    if (!db.therapistServices) {
+      db.therapistServices = [];
+    }
 
-  return sanitizeAssignment(assignment, therapist, therapistUser, service);
+    const existingIndex = db.therapistServices.findIndex(function (item) {
+      return item.id === assignment.id;
+    });
+
+    const jsonAssignment = assignmentToJson(assignment);
+
+    if (existingIndex >= 0) {
+      db.therapistServices[existingIndex] = {
+        ...db.therapistServices[existingIndex],
+        ...jsonAssignment
+      };
+    } else {
+      db.therapistServices.push(jsonAssignment);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json therapist-service sync failed:", error);
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || ""
+      }
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
 }
 
 function therapistOwnsProfile(req, therapist) {
   return therapist && therapist.userId === req.user.id;
+}
+
+function assignmentInclude() {
+  return {
+    therapist: {
+      include: {
+        user: true
+      }
+    },
+    service: true
+  };
 }
 
 // GET all assignments
@@ -75,18 +149,32 @@ router.get(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const assignments = await prisma.therapistService.findMany({
+        include: assignmentInclude(),
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
 
-    const assignments = db.therapistServices.map(function (assignment) {
-      return getAssignmentDetails(db, assignment);
-    });
+      const result = assignments.map(function (assignment) {
+        return sanitizeAssignment(assignment);
+      });
 
-    return res.json({
-      success: true,
-      count: assignments.length,
-      assignments
-    });
+      return res.json({
+        success: true,
+        count: result.length,
+        assignments: result
+      });
+    } catch (error) {
+      console.error("Get therapist-service assignments error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load therapist-service assignments"
+      });
+    }
   }
 );
 
@@ -95,40 +183,58 @@ router.get(
   "/therapists/:therapistId",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const therapist = await prisma.therapist.findUnique({
+        where: {
+          id: req.params.therapistId
+        }
+      });
 
-    const therapist = db.therapists.find(function (item) {
-      return item.id === req.params.therapistId;
-    });
+      if (!therapist) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
 
-    if (!therapist) {
-      return res.status(404).json({
+      if (
+        req.user.role === USER_ROLES.THERAPIST &&
+        !therapistOwnsProfile(req, therapist)
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own service assignments"
+        });
+      }
+
+      const assignments = await prisma.therapistService.findMany({
+        where: {
+          therapistId: req.params.therapistId
+        },
+        include: assignmentInclude(),
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
+
+      const result = assignments.map(function (assignment) {
+        return sanitizeAssignment(assignment);
+      });
+
+      return res.json({
+        success: true,
+        count: result.length,
+        assignments: result
+      });
+    } catch (error) {
+      console.error("Get assignments by therapist error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Failed to load therapist assignments"
       });
     }
-
-    if (req.user.role === USER_ROLES.THERAPIST && !therapistOwnsProfile(req, therapist)) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only view your own service assignments"
-      });
-    }
-
-    const assignments = db.therapistServices
-      .filter(function (assignment) {
-        return assignment.therapistId === req.params.therapistId;
-      })
-      .map(function (assignment) {
-        return getAssignmentDetails(db, assignment);
-      });
-
-    return res.json({
-      success: true,
-      count: assignments.length,
-      assignments
-    });
   }
 );
 
@@ -137,33 +243,48 @@ router.get(
   "/services/:serviceId",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const service = await prisma.service.findUnique({
+        where: {
+          id: req.params.serviceId
+        }
+      });
 
-    const service = db.services.find(function (item) {
-      return item.id === req.params.serviceId;
-    });
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
+      }
 
-    if (!service) {
-      return res.status(404).json({
+      const assignments = await prisma.therapistService.findMany({
+        where: {
+          serviceId: req.params.serviceId
+        },
+        include: assignmentInclude(),
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
+
+      const result = assignments.map(function (assignment) {
+        return sanitizeAssignment(assignment);
+      });
+
+      return res.json({
+        success: true,
+        count: result.length,
+        assignments: result
+      });
+    } catch (error) {
+      console.error("Get assignments by service error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Service not found"
+        message: "Failed to load service assignments"
       });
     }
-
-    const assignments = db.therapistServices
-      .filter(function (assignment) {
-        return assignment.serviceId === req.params.serviceId;
-      })
-      .map(function (assignment) {
-        return getAssignmentDetails(db, assignment);
-      });
-
-    return res.json({
-      success: true,
-      count: assignments.length,
-      assignments
-    });
   }
 );
 
@@ -172,124 +293,142 @@ router.post(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = createAssignmentSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = createAssignmentSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten()
+        });
+      }
+
+      const existingAssignment = await prisma.therapistService.findFirst({
+        where: {
+          therapistId: result.data.therapistId,
+          serviceId: result.data.serviceId
+        }
       });
-    }
 
-    const db = loadDB();
+      if (existingAssignment) {
+        const currentLocationIds = existingAssignment.locationIds || [];
+        const newLocationIds = result.data.locationIds || [];
 
-    if (!db.therapistServices) {
-      db.therapistServices = [];
-    }
+        const currentAppointmentTypes = existingAssignment.appointmentTypes || [];
+        const newAppointmentTypes = result.data.appointmentTypes || [];
 
-    const existingAssignment = db.therapistServices.find(function (assignment) {
-      return (
-        assignment.therapistId === result.data.therapistId &&
-        assignment.serviceId === result.data.serviceId
+        const updatedAssignment = await prisma.therapistService.update({
+          where: {
+            id: existingAssignment.id
+          },
+          data: {
+            locationIds: Array.from(
+              new Set([...currentLocationIds, ...newLocationIds])
+            ),
+            appointmentTypes: Array.from(
+              new Set([...currentAppointmentTypes, ...newAppointmentTypes])
+            ),
+            notes: result.data.notes || existingAssignment.notes || "",
+            status: "active",
+            updatedAt: new Date()
+          },
+          include: assignmentInclude()
+        });
+
+        // Temporary sync while availability/appointments still use db.json
+        upsertJsonAssignment(updatedAssignment);
+
+        await addPrismaAuditLog(
+          "THERAPIST_SERVICE_ASSIGNMENT_UPDATED",
+          req.user.email,
+          `Updated therapist-service assignment ${updatedAssignment.id}`
+        );
+
+        return res.json({
+          success: true,
+          message: "Therapist service assignment updated successfully",
+          therapistService: sanitizeAssignment(updatedAssignment),
+          assignment: sanitizeAssignment(updatedAssignment)
+        });
+      }
+
+      const therapist = await prisma.therapist.findUnique({
+        where: {
+          id: result.data.therapistId
+        }
+      });
+
+      if (!therapist) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
+
+      if (therapist.profileStatus !== "active") {
+        return res.status(400).json({
+          success: false,
+          message: "Therapist profile is not active"
+        });
+      }
+
+      const service = await prisma.service.findUnique({
+        where: {
+          id: result.data.serviceId
+        }
+      });
+
+      if (!service) {
+        return res.status(404).json({
+          success: false,
+          message: "Service not found"
+        });
+      }
+
+      if (service.status !== "active") {
+        return res.status(400).json({
+          success: false,
+          message: "Service is not active"
+        });
+      }
+
+      const assignment = await prisma.therapistService.create({
+        data: {
+          id: createId("therapist-service"),
+          therapistId: result.data.therapistId,
+          serviceId: result.data.serviceId,
+          locationIds: result.data.locationIds || [],
+          appointmentTypes: result.data.appointmentTypes || [],
+          notes: result.data.notes || "",
+          status: "active"
+        },
+        include: assignmentInclude()
+      });
+
+      // Temporary sync while availability/appointments still use db.json
+      upsertJsonAssignment(assignment);
+
+      await addPrismaAuditLog(
+        "THERAPIST_SERVICE_ASSIGNED",
+        req.user.email,
+        `Assigned therapist ${assignment.therapistId} to service ${assignment.serviceId}`
       );
-    });
 
-    if (existingAssignment) {
-      const currentLocationIds = existingAssignment.locationIds || [];
-      const newLocationIds = result.data.locationIds || [];
-
-      const currentAppointmentTypes = existingAssignment.appointmentTypes || [];
-      const newAppointmentTypes = result.data.appointmentTypes || [];
-
-      existingAssignment.locationIds = Array.from(
-        new Set([...currentLocationIds, ...newLocationIds]),
-      );
-
-      existingAssignment.appointmentTypes = Array.from(
-        new Set([...currentAppointmentTypes, ...newAppointmentTypes]),
-      );
-
-      existingAssignment.notes =
-        result.data.notes || existingAssignment.notes || "";
-      existingAssignment.status = "active";
-      existingAssignment.updatedAt = new Date().toISOString();
-
-      saveDB(db);
-
-      return res.json({
+      return res.status(201).json({
         success: true,
-        message: "Therapist service assignment updated successfully",
-        therapistService: existingAssignment,
-        assignment: existingAssignment,
+        message: "Therapist assigned to service successfully",
+        assignment: sanitizeAssignment(assignment)
       });
-    }
+    } catch (error) {
+      console.error("Create therapist-service assignment error:", error);
 
-    const therapist = db.therapists.find(function (item) {
-      return item.id === result.data.therapistId;
-    });
-
-    if (!therapist) {
-      return res.status(404).json({
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Failed to create therapist-service assignment"
       });
     }
-
-    if (therapist.profileStatus !== "active") {
-      return res.status(400).json({
-        success: false,
-        message: "Therapist profile is not active"
-      });
-    }
-
-    const service = db.services.find(function (item) {
-      return item.id === result.data.serviceId;
-    });
-
-    if (!service) {
-      return res.status(404).json({
-        success: false,
-        message: "Service not found"
-      });
-    }
-
-    if (service.status !== "active") {
-      return res.status(400).json({
-        success: false,
-        message: "Service is not active"
-      });
-    }
-
-    const now = new Date().toISOString();
-
-    const assignment = {
-      id: Date.now().toString(),
-      therapistId: result.data.therapistId,
-      serviceId: result.data.serviceId,
-      locationIds: result.data.locationIds || [],
-      appointmentTypes: result.data.appointmentTypes || [],
-      notes: result.data.notes || "",
-      status: "active",
-      createdAt: now,
-      updatedAt: null
-    };
-
-    db.therapistServices.push(assignment);
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_SERVICE_ASSIGNED",
-      req.user.email,
-      `Assigned therapist ${assignment.therapistId} to service ${assignment.serviceId}`
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Therapist assigned to service successfully",
-      assignment: getAssignmentDetails(db, assignment)
-    });
   }
 );
 
@@ -298,53 +437,73 @@ router.patch(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateAssignmentSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateAssignmentSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
-      });
-    }
-
-    const db = loadDB();
-
-    const assignment = db.therapistServices.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!assignment) {
-      return res.status(404).json({
-        success: false,
-        message: "Assignment not found"
-      });
-    }
-
-    const allowedFields = ["locationIds", "appointmentTypes", "notes"];
-
-    allowedFields.forEach(function (field) {
-      if (Object.prototype.hasOwnProperty.call(result.data, field)) {
-        assignment[field] = result.data[field];
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten()
+        });
       }
-    });
 
-    assignment.updatedAt = new Date().toISOString();
+      const assignment = await prisma.therapistService.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
 
-    saveDB(db);
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: "Assignment not found"
+        });
+      }
 
-    addAuditLog(
-      "THERAPIST_SERVICE_ASSIGNMENT_UPDATED",
-      req.user.email,
-      `Updated therapist-service assignment ${assignment.id}`
-    );
+      const updateData = {};
 
-    return res.json({
-      success: true,
-      message: "Assignment updated successfully",
-      assignment: getAssignmentDetails(db, assignment)
-    });
+      const allowedFields = ["locationIds", "appointmentTypes", "notes"];
+
+      allowedFields.forEach(function (field) {
+        if (Object.prototype.hasOwnProperty.call(result.data, field)) {
+          updateData[field] = result.data[field];
+        }
+      });
+
+      updateData.updatedAt = new Date();
+
+      const updatedAssignment = await prisma.therapistService.update({
+        where: {
+          id: assignment.id
+        },
+        data: updateData,
+        include: assignmentInclude()
+      });
+
+      // Temporary sync while availability/appointments still use db.json
+      upsertJsonAssignment(updatedAssignment);
+
+      await addPrismaAuditLog(
+        "THERAPIST_SERVICE_ASSIGNMENT_UPDATED",
+        req.user.email,
+        `Updated therapist-service assignment ${updatedAssignment.id}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Assignment updated successfully",
+        assignment: sanitizeAssignment(updatedAssignment)
+      });
+    } catch (error) {
+      console.error("Update therapist-service assignment error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update therapist-service assignment"
+      });
+    }
   }
 );
 
@@ -353,46 +512,64 @@ router.patch(
   "/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+          errors: result.error.flatten()
+        });
+      }
+
+      const assignment = await prisma.therapistService.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
+
+      if (!assignment) {
+        return res.status(404).json({
+          success: false,
+          message: "Assignment not found"
+        });
+      }
+
+      const updatedAssignment = await prisma.therapistService.update({
+        where: {
+          id: assignment.id
+        },
+        data: {
+          status: result.data.status,
+          updatedAt: new Date()
+        },
+        include: assignmentInclude()
+      });
+
+      // Temporary sync while availability/appointments still use db.json
+      upsertJsonAssignment(updatedAssignment);
+
+      await addPrismaAuditLog(
+        "THERAPIST_SERVICE_ASSIGNMENT_STATUS_UPDATED",
+        req.user.email,
+        `Changed assignment ${updatedAssignment.id} status to ${updatedAssignment.status}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Assignment status updated successfully",
+        assignment: sanitizeAssignment(updatedAssignment)
+      });
+    } catch (error) {
+      console.error("Update therapist-service assignment status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid status",
-        errors: result.error.flatten()
+        message: "Failed to update assignment status"
       });
     }
-
-    const db = loadDB();
-
-    const assignment = db.therapistServices.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!assignment) {
-      return res.status(404).json({
-        success: false,
-        message: "Assignment not found"
-      });
-    }
-
-    assignment.status = result.data.status;
-    assignment.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_SERVICE_ASSIGNMENT_STATUS_UPDATED",
-      req.user.email,
-      `Changed assignment ${assignment.id} status to ${assignment.status}`
-    );
-
-    return res.json({
-      success: true,
-      message: "Assignment status updated successfully",
-      assignment: getAssignmentDetails(db, assignment)
-    });
   }
 );
 

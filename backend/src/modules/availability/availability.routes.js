@@ -1,7 +1,10 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
+
 const {
   authMiddleware,
   allowRoles,
@@ -73,6 +76,16 @@ const updateTimeOffStatusSchema = z.object({
   status: z.enum(["active", "cancelled"]),
 });
 
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function toIso(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value.toISOString();
+  return value;
+}
+
 function timeToMinutes(time) {
   const parts = time.split(":");
   return Number(parts[0]) * 60 + Number(parts[1]);
@@ -81,50 +94,6 @@ function timeToMinutes(time) {
 function isValidDateTime(value) {
   const date = new Date(value);
   return !Number.isNaN(date.getTime());
-}
-
-function sanitizeAvailability(rule) {
-  return {
-    id: rule.id,
-    therapistId: rule.therapistId,
-    dayOfWeek: rule.dayOfWeek,
-    dayName: DAY_NAMES[rule.dayOfWeek],
-    startTime: rule.startTime,
-    endTime: rule.endTime,
-    locationId: rule.locationId || (rule.locationIds || [])[0] || null,
-    locationIds: rule.locationIds || (rule.locationId ? [rule.locationId] : []),
-    appointmentTypes: rule.appointmentTypes || [],
-    notes: rule.notes || "",
-    status: rule.status,
-    createdAt: rule.createdAt,
-    updatedAt: rule.updatedAt || null,
-  };
-}
-
-function sanitizeTimeOff(block) {
-  return {
-    id: block.id,
-    therapistId: block.therapistId,
-    startDateTime: block.startDateTime,
-    endDateTime: block.endDateTime,
-    type: block.type,
-    reason: block.reason || "",
-    notes: block.notes || "",
-    status: block.status,
-    createdAt: block.createdAt,
-    updatedAt: block.updatedAt || null,
-  };
-}
-
-function findTherapistProfile(db, therapistId) {
-  return db.therapists.find(function (therapist) {
-    return therapist.id === therapistId;
-  });
-}
-
-function canTherapistAccessProfile(req, therapistProfile) {
-  if (req.user.role !== USER_ROLES.THERAPIST) return true;
-  return therapistProfile && therapistProfile.userId === req.user.id;
 }
 
 function validateTimeRange(startTime, endTime) {
@@ -140,11 +109,11 @@ function validateDateTimeRange(startDateTime, endDateTime) {
 }
 
 function getLocationIdsFromData(data, fallbackRule) {
-  if (data.locationId) {
+  if (data && data.locationId) {
     return [data.locationId];
   }
 
-  if (Array.isArray(data.locationIds)) {
+  if (data && Array.isArray(data.locationIds)) {
     return data.locationIds;
   }
 
@@ -161,110 +130,243 @@ function getLocationIdsFromData(data, fallbackRule) {
   return [];
 }
 
-function findDifferentLocationRuleForDay(
-  db,
-  therapistId,
-  dayOfWeek,
-  locationIds,
-  excludeRuleId,
-) {
-  if (!locationIds || locationIds.length === 0) {
-    return null;
-  }
+function sanitizeAvailability(rule) {
+  const locationIds = getLocationIdsFromData({}, rule);
 
-  return (db.therapistAvailability || []).find(function (rule) {
-    if (excludeRuleId && rule.id === excludeRuleId) {
-      return false;
+  return {
+    id: rule.id,
+    therapistId: rule.therapistId,
+    dayOfWeek: rule.dayOfWeek,
+    dayName: DAY_NAMES[rule.dayOfWeek],
+    startTime: rule.startTime,
+    endTime: rule.endTime,
+    locationId: rule.locationId || locationIds[0] || null,
+    locationIds,
+    appointmentTypes: rule.appointmentTypes || [],
+    notes: rule.notes || "",
+    status: rule.status,
+    createdAt: toIso(rule.createdAt),
+    updatedAt: toIso(rule.updatedAt),
+  };
+}
+
+function sanitizeTimeOff(block) {
+  return {
+    id: block.id,
+    therapistId: block.therapistId,
+    startDateTime: toIso(block.startDateTime),
+    endDateTime: toIso(block.endDateTime),
+    type: block.type,
+    reason: block.reason || "",
+    notes: block.notes || "",
+    status: block.status,
+    createdAt: toIso(block.createdAt),
+    updatedAt: toIso(block.updatedAt),
+  };
+}
+
+function availabilityToJson(rule) {
+  const locationIds = getLocationIdsFromData({}, rule);
+
+  return {
+    id: rule.id,
+    therapistId: rule.therapistId,
+    dayOfWeek: rule.dayOfWeek,
+    startTime: rule.startTime,
+    endTime: rule.endTime,
+    locationId: rule.locationId || locationIds[0] || null,
+    locationIds,
+    appointmentTypes: rule.appointmentTypes || [],
+    notes: rule.notes || "",
+    status: rule.status || "active",
+    createdAt: toIso(rule.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(rule.updatedAt),
+  };
+}
+
+function timeOffToJson(block) {
+  return {
+    id: block.id,
+    therapistId: block.therapistId,
+    startDateTime: toIso(block.startDateTime),
+    endDateTime: toIso(block.endDateTime),
+    type: block.type,
+    reason: block.reason || "",
+    notes: block.notes || "",
+    status: block.status || "active",
+    createdAt: toIso(block.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(block.updatedAt),
+  };
+}
+
+function upsertJsonAvailability(rule) {
+  try {
+    const db = loadDB();
+
+    if (!db.therapistAvailability) {
+      db.therapistAvailability = [];
     }
 
-    const existingLocationIds = getLocationIdsFromData({}, rule);
+    const existingIndex = db.therapistAvailability.findIndex(function (item) {
+      return item.id === rule.id;
+    });
 
-    const hasDifferentLocation =
-      existingLocationIds.length > 0 &&
-      !locationIds.every(function (locationId) {
-        return existingLocationIds.includes(locationId);
-      });
+    const jsonRule = availabilityToJson(rule);
 
-    return (
-      rule.therapistId === therapistId &&
-      Number(rule.dayOfWeek) === Number(dayOfWeek) &&
-      rule.status !== "inactive" &&
-      rule.status !== "archived" &&
-      hasDifferentLocation
-    );
+    if (existingIndex >= 0) {
+      db.therapistAvailability[existingIndex] = {
+        ...db.therapistAvailability[existingIndex],
+        ...jsonRule,
+      };
+    } else {
+      db.therapistAvailability.push(jsonRule);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json availability sync failed:", error);
+  }
+}
+
+function upsertJsonTimeOff(block) {
+  try {
+    const db = loadDB();
+
+    if (!db.therapistTimeOff) {
+      db.therapistTimeOff = [];
+    }
+
+    const existingIndex = db.therapistTimeOff.findIndex(function (item) {
+      return item.id === block.id;
+    });
+
+    const jsonBlock = timeOffToJson(block);
+
+    if (existingIndex >= 0) {
+      db.therapistTimeOff[existingIndex] = {
+        ...db.therapistTimeOff[existingIndex],
+        ...jsonBlock,
+      };
+    } else {
+      db.therapistTimeOff.push(jsonBlock);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json time-off sync failed:", error);
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || "",
+      },
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
+}
+
+async function findTherapistProfile(therapistId) {
+  return prisma.therapist.findUnique({
+    where: {
+      id: therapistId,
+    },
+    include: {
+      user: true,
+    },
   });
 }
 
-function buildAvailabilityWithNames(db, rule) {
-  const therapist = (db.therapists || []).find(function (item) {
-    return item.id === rule.therapistId;
+function canTherapistAccessProfile(req, therapistProfile) {
+  if (req.user.role !== USER_ROLES.THERAPIST) {
+    return true;
+  }
+
+  return therapistProfile && therapistProfile.userId === req.user.id;
+}
+
+async function getLocationNameMap(locationIds) {
+  const uniqueIds = Array.from(new Set((locationIds || []).filter(Boolean)));
+
+  if (uniqueIds.length === 0) {
+    return {};
+  }
+
+  const locations = await prisma.location.findMany({
+    where: {
+      id: {
+        in: uniqueIds,
+      },
+    },
+    select: {
+      id: true,
+      name: true,
+      locationType: true,
+    },
   });
 
-  const therapistUser = therapist
-    ? (db.users || []).find(function (user) {
-        return user.id === therapist.userId;
-      })
-    : null;
+  return locations.reduce(function (map, location) {
+    map[location.id] = location;
+    return map;
+  }, {});
+}
 
+async function buildAvailabilityWithNames(rule) {
+  const therapistProfile = await findTherapistProfile(rule.therapistId);
   const locationIds = getLocationIdsFromData({}, rule);
+  const locationMap = await getLocationNameMap(locationIds);
 
-  const locations = locationIds
-    .map(function (locationId) {
-      return (db.locations || []).find(function (location) {
-        return location.id === locationId;
-      });
-    })
-    .filter(Boolean)
-    .map(function (location) {
-      return {
-        id: location.id,
-        name: location.name,
-        locationType: location.locationType,
-      };
-    });
+  const locations = locationIds.map(function (locationId) {
+    const location = locationMap[locationId];
+
+    return {
+      id: locationId,
+      name: location ? location.name : locationId,
+      locationType: location ? location.locationType : null,
+    };
+  });
 
   return {
     ...sanitizeAvailability(rule),
-    therapistName: therapistUser ? therapistUser.name : null,
-    therapistEmail: therapistUser ? therapistUser.email : null,
+    therapistName:
+      therapistProfile && therapistProfile.user
+        ? therapistProfile.user.name
+        : null,
+    therapistEmail:
+      therapistProfile && therapistProfile.user
+        ? therapistProfile.user.email
+        : null,
     locations,
   };
 }
 
-function getLocationIdsFromData(data, fallbackRule) {
-  if (data.locationId) {
-    return [data.locationId];
-  }
-
-  if (Array.isArray(data.locationIds)) {
-    return data.locationIds;
-  }
-
-  if (fallbackRule) {
-    if (fallbackRule.locationId) {
-      return [fallbackRule.locationId];
-    }
-
-    if (Array.isArray(fallbackRule.locationIds)) {
-      return fallbackRule.locationIds;
-    }
-  }
-
-  return [];
-}
-
-function findDifferentLocationRuleForDay(
-  db,
+async function findDifferentLocationRuleForDay(
   therapistId,
   dayOfWeek,
   locationIds,
-  excludeRuleId,
+  excludeRuleId
 ) {
   if (!locationIds || locationIds.length === 0) {
     return null;
   }
 
-  return db.therapistAvailability.find(function (rule) {
+  const rules = await prisma.therapistAvailability.findMany({
+    where: {
+      therapistId,
+      dayOfWeek: Number(dayOfWeek),
+      status: {
+        notIn: ["inactive", "archived"],
+      },
+    },
+  });
+
+  return rules.find(function (rule) {
     if (excludeRuleId && rule.id === excludeRuleId) {
       return false;
     }
@@ -277,13 +379,7 @@ function findDifferentLocationRuleForDay(
         return existingLocationIds.includes(locationId);
       });
 
-    return (
-      rule.therapistId === therapistId &&
-      Number(rule.dayOfWeek) === Number(dayOfWeek) &&
-      rule.status !== "inactive" &&
-      rule.status !== "archived" &&
-      hasDifferentLocation
-    );
+    return hasDifferentLocation;
   });
 }
 
@@ -292,31 +388,46 @@ router.get(
   "/weekly",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const where = {};
 
-    if (!db.therapistAvailability) {
-      db.therapistAvailability = [];
-    }
+      if (req.query.therapistId) {
+        where.therapistId = req.query.therapistId;
+      }
 
-    let rules = db.therapistAvailability;
+      const rules = await prisma.therapistAvailability.findMany({
+        where,
+        orderBy: [
+          {
+            dayOfWeek: "asc",
+          },
+          {
+            startTime: "asc",
+          },
+        ],
+      });
 
-    if (req.query.therapistId) {
-      rules = rules.filter(function (rule) {
-        return rule.therapistId === req.query.therapistId;
+      const availability = await Promise.all(
+        rules.map(function (rule) {
+          return buildAvailabilityWithNames(rule);
+        })
+      );
+
+      return res.json({
+        success: true,
+        count: availability.length,
+        availability,
+      });
+    } catch (error) {
+      console.error("Get weekly availability error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load availability",
       });
     }
-
-    const availability = rules.map(function (rule) {
-      return buildAvailabilityWithNames(db, rule);
-    });
-
-    return res.json({
-      success: true,
-      count: availability.length,
-      availability,
-    });
-  },
+  }
 );
 
 // GET therapist full availability summary
@@ -324,48 +435,62 @@ router.get(
   "/therapists/:therapistId/summary",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const therapistProfile = await findTherapistProfile(req.params.therapistId);
 
-    const therapistProfile = findTherapistProfile(db, req.params.therapistId);
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found",
+        });
+      }
 
-    if (!therapistProfile) {
-      return res.status(404).json({
+      if (!canTherapistAccessProfile(req, therapistProfile)) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own availability",
+        });
+      }
+
+      const weeklyRules = await prisma.therapistAvailability.findMany({
+        where: {
+          therapistId: req.params.therapistId,
+        },
+        orderBy: [
+          {
+            dayOfWeek: "asc",
+          },
+          {
+            startTime: "asc",
+          },
+        ],
+      });
+
+      const blocks = await prisma.therapistTimeOff.findMany({
+        where: {
+          therapistId: req.params.therapistId,
+        },
+        orderBy: {
+          startDateTime: "asc",
+        },
+      });
+
+      return res.json({
+        success: true,
+        therapistId: req.params.therapistId,
+        weeklyAvailability: weeklyRules.map(sanitizeAvailability),
+        timeOff: blocks.map(sanitizeTimeOff),
+      });
+    } catch (error) {
+      console.error("Get therapist availability summary error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found",
+        message: "Failed to load therapist availability summary",
       });
     }
-
-    if (!canTherapistAccessProfile(req, therapistProfile)) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only view your own availability",
-      });
-    }
-
-    const weeklyAvailability = db.therapistAvailability
-      .filter(function (rule) {
-        return rule.therapistId === req.params.therapistId;
-      })
-      .map(function (rule) {
-        return sanitizeAvailability(rule);
-      });
-
-    const timeOff = db.therapistTimeOff
-      .filter(function (block) {
-        return block.therapistId === req.params.therapistId;
-      })
-      .map(function (block) {
-        return sanitizeTimeOff(block);
-      });
-
-    return res.json({
-      success: true,
-      therapistId: req.params.therapistId,
-      weeklyAvailability,
-      timeOff,
-    });
-  },
+  }
 );
 
 // GET weekly availability for therapist
@@ -373,102 +498,52 @@ router.get(
   "/therapists/:therapistId/weekly",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const therapistProfile = await findTherapistProfile(req.params.therapistId);
 
-    const therapistProfile = findTherapistProfile(db, req.params.therapistId);
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found",
+        });
+      }
 
-    if (!therapistProfile) {
-      return res.status(404).json({
+      if (!canTherapistAccessProfile(req, therapistProfile)) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own availability",
+        });
+      }
+
+      const rules = await prisma.therapistAvailability.findMany({
+        where: {
+          therapistId: req.params.therapistId,
+        },
+        orderBy: [
+          {
+            dayOfWeek: "asc",
+          },
+          {
+            startTime: "asc",
+          },
+        ],
+      });
+
+      return res.json({
+        success: true,
+        count: rules.length,
+        availability: rules.map(sanitizeAvailability),
+      });
+    } catch (error) {
+      console.error("Get therapist weekly availability error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found",
+        message: "Failed to load therapist weekly availability",
       });
     }
-
-    if (!canTherapistAccessProfile(req, therapistProfile)) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only view your own availability",
-      });
-    }
-
-    const availability = db.therapistAvailability
-      .filter(function (rule) {
-        return rule.therapistId === req.params.therapistId;
-      })
-      .map(function (rule) {
-        return sanitizeAvailability(rule);
-      });
-
-    return res.json({
-      success: true,
-      count: availability.length,
-      availability,
-    });
-  },
-);
-
-// GET all weekly availability for admin table
-router.get(
-  "/weekly",
-  authMiddleware,
-  allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
-
-    if (!db.therapistAvailability) {
-      db.therapistAvailability = [];
-    }
-
-    let rules = db.therapistAvailability;
-
-    if (req.query.therapistId) {
-      rules = rules.filter(function (rule) {
-        return rule.therapistId === req.query.therapistId;
-      });
-    }
-
-    const availability = rules.map(function (rule) {
-      const therapist = db.therapists.find(function (item) {
-        return item.id === rule.therapistId;
-      });
-
-      const therapistUser = therapist
-        ? db.users.find(function (user) {
-            return user.id === therapist.userId;
-          })
-        : null;
-
-      const locationIds = getLocationIdsFromData({}, rule);
-
-      const locations = locationIds
-        .map(function (locationId) {
-          return db.locations.find(function (location) {
-            return location.id === locationId;
-          });
-        })
-        .filter(Boolean);
-
-      return {
-        ...sanitizeAvailability(rule),
-        therapistName: therapistUser ? therapistUser.name : null,
-        therapistEmail: therapistUser ? therapistUser.email : null,
-        locations: locations.map(function (location) {
-          return {
-            id: location.id,
-            name: location.name,
-            locationType: location.locationType,
-          };
-        }),
-      };
-    });
-
-    return res.json({
-      success: true,
-      count: availability.length,
-      availability,
-    });
-  },
+  }
 );
 
 // CREATE weekly availability
@@ -476,119 +551,131 @@ router.post(
   "/weekly",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = createWeeklyAvailabilitySchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = createWeeklyAvailabilitySchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten(),
-      });
-    }
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten(),
+        });
+      }
 
-    if (!validateTimeRange(result.data.startTime, result.data.endTime)) {
-      return res.status(400).json({
-        success: false,
-        message: "End time must be after start time",
-      });
-    }
+      if (!validateTimeRange(result.data.startTime, result.data.endTime)) {
+        return res.status(400).json({
+          success: false,
+          message: "End time must be after start time",
+        });
+      }
 
-    const db = loadDB();
-
-    if (!db.therapistAvailability) {
-      db.therapistAvailability = [];
-    }
-
-    const therapistProfile = findTherapistProfile(db, result.data.therapistId);
-
-    if (!therapistProfile) {
-      return res.status(404).json({
-        success: false,
-        message: "Therapist profile not found",
-      });
-    }
-
-    const incomingLocationIds = getLocationIdsFromData(result.data);
-
-    const existingRule = db.therapistAvailability.find(function (rule) {
-      return (
-        rule.therapistId === result.data.therapistId &&
-        Number(rule.dayOfWeek) === Number(result.data.dayOfWeek) &&
-        rule.startTime === result.data.startTime &&
-        rule.endTime === result.data.endTime &&
-        rule.status !== "archived"
+      const therapistProfile = await findTherapistProfile(
+        result.data.therapistId
       );
-    });
 
-    const conflictingLocationRule = findDifferentLocationRuleForDay(
-      db,
-      result.data.therapistId,
-      result.data.dayOfWeek,
-      incomingLocationIds,
-      existingRule ? existingRule.id : null,
-    );
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found",
+        });
+      }
 
-    if (conflictingLocationRule) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "This therapist already has availability at another location for this day. A therapist can be available at only one location per day.",
+      const incomingLocationIds = getLocationIdsFromData(result.data);
+
+      const existingRule = await prisma.therapistAvailability.findFirst({
+        where: {
+          therapistId: result.data.therapistId,
+          dayOfWeek: Number(result.data.dayOfWeek),
+          startTime: result.data.startTime,
+          endTime: result.data.endTime,
+          status: {
+            not: "archived",
+          },
+        },
       });
-    }
 
-    if (existingRule) {
-      existingRule.locationId = incomingLocationIds[0] || null;
-      existingRule.locationIds = incomingLocationIds;
-      existingRule.appointmentTypes =
-        result.data.appointmentTypes || existingRule.appointmentTypes || [];
-      existingRule.notes = result.data.notes || existingRule.notes || "";
-      existingRule.startTime = result.data.startTime;
-      existingRule.endTime = result.data.endTime;
-      existingRule.status = result.data.status || "active";
-      existingRule.updatedAt = new Date().toISOString();
+      const conflictingLocationRule = await findDifferentLocationRuleForDay(
+        result.data.therapistId,
+        result.data.dayOfWeek,
+        incomingLocationIds,
+        existingRule ? existingRule.id : null
+      );
 
-      saveDB(db);
+      if (conflictingLocationRule) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This therapist already has availability at another location for this day. A therapist can be available at only one location per day.",
+        });
+      }
 
-      return res.json({
+      if (existingRule) {
+        const updatedRule = await prisma.therapistAvailability.update({
+          where: {
+            id: existingRule.id,
+          },
+          data: {
+            locationId: incomingLocationIds[0] || null,
+            locationIds: incomingLocationIds,
+            appointmentTypes:
+              result.data.appointmentTypes ||
+              existingRule.appointmentTypes ||
+              [],
+            notes: result.data.notes || existingRule.notes || "",
+            startTime: result.data.startTime,
+            endTime: result.data.endTime,
+            status: result.data.status || "active",
+            updatedAt: new Date(),
+          },
+        });
+
+        upsertJsonAvailability(updatedRule);
+
+        return res.json({
+          success: true,
+          message: "Availability rule updated successfully",
+          availability: await buildAvailabilityWithNames(updatedRule),
+        });
+      }
+
+      const availabilityRule = await prisma.therapistAvailability.create({
+        data: {
+          id: createId("availability"),
+          therapistId: result.data.therapistId,
+          dayOfWeek: result.data.dayOfWeek,
+          startTime: result.data.startTime,
+          endTime: result.data.endTime,
+          locationId: incomingLocationIds[0] || null,
+          locationIds: incomingLocationIds,
+          appointmentTypes: result.data.appointmentTypes || [],
+          notes: result.data.notes || "",
+          status: result.data.status || "active",
+        },
+      });
+
+      upsertJsonAvailability(availabilityRule);
+
+      await addPrismaAuditLog(
+        "THERAPIST_AVAILABILITY_CREATED",
+        req.user.email,
+        `Created availability for therapist profile ${result.data.therapistId}`
+      );
+
+      return res.status(201).json({
         success: true,
-        message: "Availability rule updated successfully",
-        availability: sanitizeAvailability(existingRule),
+        message: "Therapist availability created successfully",
+        availability: await buildAvailabilityWithNames(availabilityRule),
+      });
+    } catch (error) {
+      console.error("Create weekly availability error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to create therapist availability",
       });
     }
-
-    const now = new Date().toISOString();
-
-    const availabilityRule = {
-      id: Date.now().toString(),
-      therapistId: result.data.therapistId,
-      dayOfWeek: result.data.dayOfWeek,
-      startTime: result.data.startTime,
-      endTime: result.data.endTime,
-      locationId: incomingLocationIds[0] || null,
-      locationIds: incomingLocationIds,
-      appointmentTypes: result.data.appointmentTypes || [],
-      notes: result.data.notes || "",
-      status: result.data.status || "active",
-      createdAt: now,
-      updatedAt: null,
-    };
-
-    db.therapistAvailability.push(availabilityRule);
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_AVAILABILITY_CREATED",
-      req.user.email,
-      `Created availability for therapist profile ${result.data.therapistId}`,
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Therapist availability created successfully",
-      availability: sanitizeAvailability(availabilityRule),
-    });
-  },
+  }
 );
 
 // UPDATE weekly availability
@@ -596,103 +683,119 @@ router.patch(
   "/weekly/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateWeeklyAvailabilitySchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateWeeklyAvailabilitySchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten(),
+        });
+      }
+
+      const rule = await prisma.therapistAvailability.findUnique({
+        where: {
+          id: req.params.id,
+        },
+      });
+
+      if (!rule) {
+        return res.status(404).json({
+          success: false,
+          message: "Availability rule not found",
+        });
+      }
+
+      const newStartTime = result.data.startTime || rule.startTime;
+      const newEndTime = result.data.endTime || rule.endTime;
+      const newDayOfWeek =
+        result.data.dayOfWeek !== undefined
+          ? result.data.dayOfWeek
+          : rule.dayOfWeek;
+
+      if (!validateTimeRange(newStartTime, newEndTime)) {
+        return res.status(400).json({
+          success: false,
+          message: "End time must be after start time",
+        });
+      }
+
+      const newLocationIds = getLocationIdsFromData(result.data, rule);
+
+      if (newLocationIds.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Please select a location for this availability rule",
+        });
+      }
+
+      const conflictingLocationRule = await findDifferentLocationRuleForDay(
+        rule.therapistId,
+        newDayOfWeek,
+        newLocationIds,
+        rule.id
+      );
+
+      if (conflictingLocationRule) {
+        return res.status(400).json({
+          success: false,
+          message:
+            "This therapist already has availability at another location for this day. A therapist can be available at only one location per day.",
+        });
+      }
+
+      const updateData = {
+        dayOfWeek: newDayOfWeek,
+        startTime: newStartTime,
+        endTime: newEndTime,
+        locationId: newLocationIds[0] || null,
+        locationIds: newLocationIds,
+        updatedAt: new Date(),
+      };
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "appointmentTypes")) {
+        updateData.appointmentTypes = result.data.appointmentTypes || [];
+      }
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "notes")) {
+        updateData.notes = result.data.notes || "";
+      }
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "status")) {
+        updateData.status = result.data.status;
+      }
+
+      const updatedRule = await prisma.therapistAvailability.update({
+        where: {
+          id: rule.id,
+        },
+        data: updateData,
+      });
+
+      upsertJsonAvailability(updatedRule);
+
+      await addPrismaAuditLog(
+        "THERAPIST_AVAILABILITY_UPDATED",
+        req.user.email,
+        `Updated availability rule ${updatedRule.id}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Therapist availability updated successfully",
+        availability: await buildAvailabilityWithNames(updatedRule),
+      });
+    } catch (error) {
+      console.error("Update weekly availability error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid input",
-        errors: result.error.flatten(),
+        message: "Failed to update therapist availability",
       });
     }
-
-    const db = loadDB();
-
-    if (!db.therapistAvailability) {
-      db.therapistAvailability = [];
-    }
-
-    const rule = db.therapistAvailability.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!rule) {
-      return res.status(404).json({
-        success: false,
-        message: "Availability rule not found",
-      });
-    }
-
-    const newStartTime = result.data.startTime || rule.startTime;
-    const newEndTime = result.data.endTime || rule.endTime;
-    const newDayOfWeek =
-      result.data.dayOfWeek !== undefined
-        ? result.data.dayOfWeek
-        : rule.dayOfWeek;
-
-    if (!validateTimeRange(newStartTime, newEndTime)) {
-      return res.status(400).json({
-        success: false,
-        message: "End time must be after start time",
-      });
-    }
-
-    const newLocationIds = getLocationIdsFromData(result.data, rule);
-
-    if (newLocationIds.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "Please select a location for this availability rule",
-      });
-    }
-
-    const conflictingLocationRule = findDifferentLocationRuleForDay(
-      db,
-      rule.therapistId,
-      newDayOfWeek,
-      newLocationIds,
-      rule.id,
-    );
-
-    if (conflictingLocationRule) {
-      return res.status(400).json({
-        success: false,
-        message:
-          "This therapist already has availability at another location for this day. A therapist can be available at only one location per day.",
-      });
-    }
-
-    rule.dayOfWeek = newDayOfWeek;
-    rule.startTime = newStartTime;
-    rule.endTime = newEndTime;
-    rule.locationId = newLocationIds[0] || null;
-    rule.locationIds = newLocationIds;
-
-    if (Object.prototype.hasOwnProperty.call(result.data, "appointmentTypes")) {
-      rule.appointmentTypes = result.data.appointmentTypes || [];
-    }
-
-    if (Object.prototype.hasOwnProperty.call(result.data, "notes")) {
-      rule.notes = result.data.notes || "";
-    }
-
-    rule.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_AVAILABILITY_UPDATED",
-      req.user.email,
-      `Updated availability rule ${rule.id}`,
-    );
-
-    return res.json({
-      success: true,
-      message: "Therapist availability updated successfully",
-      availability: buildAvailabilityWithNames(db, rule),
-    });
-  },
+  }
 );
 
 // ACTIVE / INACTIVE weekly availability
@@ -700,47 +803,63 @@ router.patch(
   "/weekly/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateWeeklyStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateWeeklyStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+          errors: result.error.flatten(),
+        });
+      }
+
+      const rule = await prisma.therapistAvailability.findUnique({
+        where: {
+          id: req.params.id,
+        },
+      });
+
+      if (!rule) {
+        return res.status(404).json({
+          success: false,
+          message: "Availability rule not found",
+        });
+      }
+
+      const updatedRule = await prisma.therapistAvailability.update({
+        where: {
+          id: rule.id,
+        },
+        data: {
+          status: result.data.status,
+          updatedAt: new Date(),
+        },
+      });
+
+      upsertJsonAvailability(updatedRule);
+
+      await addPrismaAuditLog(
+        "THERAPIST_AVAILABILITY_STATUS_UPDATED",
+        req.user.email,
+        `Changed availability rule ${updatedRule.id} status to ${updatedRule.status}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Availability status updated successfully",
+        availability: await buildAvailabilityWithNames(updatedRule),
+      });
+    } catch (error) {
+      console.error("Update weekly availability status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid status",
-        errors: result.error.flatten(),
+        message: "Failed to update availability status",
       });
     }
-
-    const db = loadDB();
-
-    const rule = db.therapistAvailability.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!rule) {
-      return res.status(404).json({
-        success: false,
-        message: "Availability rule not found",
-      });
-    }
-
-    rule.status = result.data.status;
-    rule.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_AVAILABILITY_STATUS_UPDATED",
-      req.user.email,
-      `Changed availability rule ${rule.id} status to ${rule.status}`,
-    );
-
-    return res.json({
-      success: true,
-      message: "Availability status updated successfully",
-      availability: sanitizeAvailability(rule),
-    });
-  },
+  }
 );
 
 // GET time off for therapist
@@ -748,39 +867,47 @@ router.get(
   "/therapists/:therapistId/time-off",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const therapistProfile = await findTherapistProfile(req.params.therapistId);
 
-    const therapistProfile = findTherapistProfile(db, req.params.therapistId);
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found",
+        });
+      }
 
-    if (!therapistProfile) {
-      return res.status(404).json({
+      if (!canTherapistAccessProfile(req, therapistProfile)) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own time off",
+        });
+      }
+
+      const blocks = await prisma.therapistTimeOff.findMany({
+        where: {
+          therapistId: req.params.therapistId,
+        },
+        orderBy: {
+          startDateTime: "asc",
+        },
+      });
+
+      return res.json({
+        success: true,
+        count: blocks.length,
+        timeOff: blocks.map(sanitizeTimeOff),
+      });
+    } catch (error) {
+      console.error("Get therapist time off error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found",
+        message: "Failed to load therapist time off",
       });
     }
-
-    if (!canTherapistAccessProfile(req, therapistProfile)) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only view your own time off",
-      });
-    }
-
-    const timeOff = db.therapistTimeOff
-      .filter(function (block) {
-        return block.therapistId === req.params.therapistId;
-      })
-      .map(function (block) {
-        return sanitizeTimeOff(block);
-      });
-
-    return res.json({
-      success: true,
-      count: timeOff.length,
-      timeOff,
-    });
-  },
+  }
 );
 
 // CREATE time off / sick leave / blocked time
@@ -788,67 +915,73 @@ router.post(
   "/time-off",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = createTimeOffSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = createTimeOffSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten(),
+        });
+      }
+
+      if (
+        !validateDateTimeRange(result.data.startDateTime, result.data.endDateTime)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "End date/time must be after start date/time",
+        });
+      }
+
+      const therapistProfile = await findTherapistProfile(
+        result.data.therapistId
+      );
+
+      if (!therapistProfile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found",
+        });
+      }
+
+      const timeOffBlock = await prisma.therapistTimeOff.create({
+        data: {
+          id: createId("time-off"),
+          therapistId: result.data.therapistId,
+          startDateTime: new Date(result.data.startDateTime),
+          endDateTime: new Date(result.data.endDateTime),
+          type: result.data.type,
+          reason: result.data.reason || "",
+          notes: result.data.notes || "",
+          status: "active",
+        },
+      });
+
+      upsertJsonTimeOff(timeOffBlock);
+
+      await addPrismaAuditLog(
+        "THERAPIST_TIME_OFF_CREATED",
+        req.user.email,
+        `Created ${result.data.type} block for therapist profile ${result.data.therapistId}`
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Therapist time off created successfully",
+        timeOff: sanitizeTimeOff(timeOffBlock),
+      });
+    } catch (error) {
+      console.error("Create therapist time off error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid input",
-        errors: result.error.flatten(),
+        message: "Failed to create therapist time off",
       });
     }
-
-    if (
-      !validateDateTimeRange(result.data.startDateTime, result.data.endDateTime)
-    ) {
-      return res.status(400).json({
-        success: false,
-        message: "End date/time must be after start date/time",
-      });
-    }
-
-    const db = loadDB();
-
-    const therapistProfile = findTherapistProfile(db, result.data.therapistId);
-
-    if (!therapistProfile) {
-      return res.status(404).json({
-        success: false,
-        message: "Therapist profile not found",
-      });
-    }
-
-    const now = new Date().toISOString();
-
-    const timeOffBlock = {
-      id: Date.now().toString(),
-      therapistId: result.data.therapistId,
-      startDateTime: result.data.startDateTime,
-      endDateTime: result.data.endDateTime,
-      type: result.data.type,
-      reason: result.data.reason || "",
-      notes: result.data.notes || "",
-      status: "active",
-      createdAt: now,
-      updatedAt: null,
-    };
-
-    db.therapistTimeOff.push(timeOffBlock);
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_TIME_OFF_CREATED",
-      req.user.email,
-      `Created ${result.data.type} block for therapist profile ${result.data.therapistId}`,
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Therapist time off created successfully",
-      timeOff: sanitizeTimeOff(timeOffBlock),
-    });
-  },
+  }
 );
 
 // UPDATE time off
@@ -856,70 +989,94 @@ router.patch(
   "/time-off/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateTimeOffSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateTimeOffSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten(),
-      });
-    }
-
-    const db = loadDB();
-
-    const block = db.therapistTimeOff.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!block) {
-      return res.status(404).json({
-        success: false,
-        message: "Time off block not found",
-      });
-    }
-
-    const newStartDateTime = result.data.startDateTime || block.startDateTime;
-    const newEndDateTime = result.data.endDateTime || block.endDateTime;
-
-    if (!validateDateTimeRange(newStartDateTime, newEndDateTime)) {
-      return res.status(400).json({
-        success: false,
-        message: "End date/time must be after start date/time",
-      });
-    }
-
-    const allowedFields = [
-      "startDateTime",
-      "endDateTime",
-      "type",
-      "reason",
-      "notes",
-    ];
-
-    allowedFields.forEach(function (field) {
-      if (Object.prototype.hasOwnProperty.call(result.data, field)) {
-        block[field] = result.data[field];
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten(),
+        });
       }
-    });
 
-    block.updatedAt = new Date().toISOString();
+      const block = await prisma.therapistTimeOff.findUnique({
+        where: {
+          id: req.params.id,
+        },
+      });
 
-    saveDB(db);
+      if (!block) {
+        return res.status(404).json({
+          success: false,
+          message: "Time off block not found",
+        });
+      }
 
-    addAuditLog(
-      "THERAPIST_TIME_OFF_UPDATED",
-      req.user.email,
-      `Updated time off block ${block.id}`,
-    );
+      const newStartDateTime = result.data.startDateTime || block.startDateTime;
+      const newEndDateTime = result.data.endDateTime || block.endDateTime;
 
-    return res.json({
-      success: true,
-      message: "Therapist time off updated successfully",
-      timeOff: sanitizeTimeOff(block),
-    });
-  },
+      if (!validateDateTimeRange(newStartDateTime, newEndDateTime)) {
+        return res.status(400).json({
+          success: false,
+          message: "End date/time must be after start date/time",
+        });
+      }
+
+      const updateData = {
+        updatedAt: new Date(),
+      };
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "startDateTime")) {
+        updateData.startDateTime = new Date(result.data.startDateTime);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "endDateTime")) {
+        updateData.endDateTime = new Date(result.data.endDateTime);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "type")) {
+        updateData.type = result.data.type;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "reason")) {
+        updateData.reason = result.data.reason || "";
+      }
+
+      if (Object.prototype.hasOwnProperty.call(result.data, "notes")) {
+        updateData.notes = result.data.notes || "";
+      }
+
+      const updatedBlock = await prisma.therapistTimeOff.update({
+        where: {
+          id: block.id,
+        },
+        data: updateData,
+      });
+
+      upsertJsonTimeOff(updatedBlock);
+
+      await addPrismaAuditLog(
+        "THERAPIST_TIME_OFF_UPDATED",
+        req.user.email,
+        `Updated time off block ${updatedBlock.id}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Therapist time off updated successfully",
+        timeOff: sanitizeTimeOff(updatedBlock),
+      });
+    } catch (error) {
+      console.error("Update therapist time off error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update therapist time off",
+      });
+    }
+  }
 );
 
 // ACTIVE / CANCELLED time off
@@ -927,47 +1084,63 @@ router.patch(
   "/time-off/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateTimeOffStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateTimeOffStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+          errors: result.error.flatten(),
+        });
+      }
+
+      const block = await prisma.therapistTimeOff.findUnique({
+        where: {
+          id: req.params.id,
+        },
+      });
+
+      if (!block) {
+        return res.status(404).json({
+          success: false,
+          message: "Time off block not found",
+        });
+      }
+
+      const updatedBlock = await prisma.therapistTimeOff.update({
+        where: {
+          id: block.id,
+        },
+        data: {
+          status: result.data.status,
+          updatedAt: new Date(),
+        },
+      });
+
+      upsertJsonTimeOff(updatedBlock);
+
+      await addPrismaAuditLog(
+        "THERAPIST_TIME_OFF_STATUS_UPDATED",
+        req.user.email,
+        `Changed time off block ${updatedBlock.id} status to ${updatedBlock.status}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Time off status updated successfully",
+        timeOff: sanitizeTimeOff(updatedBlock),
+      });
+    } catch (error) {
+      console.error("Update therapist time off status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid status",
-        errors: result.error.flatten(),
+        message: "Failed to update time off status",
       });
     }
-
-    const db = loadDB();
-
-    const block = db.therapistTimeOff.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!block) {
-      return res.status(404).json({
-        success: false,
-        message: "Time off block not found",
-      });
-    }
-
-    block.status = result.data.status;
-    block.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_TIME_OFF_STATUS_UPDATED",
-      req.user.email,
-      `Changed time off block ${block.id} status to ${block.status}`,
-    );
-
-    return res.json({
-      success: true,
-      message: "Time off status updated successfully",
-      timeOff: sanitizeTimeOff(block),
-    });
-  },
+  }
 );
 
 module.exports = router;

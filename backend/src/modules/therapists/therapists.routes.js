@@ -1,7 +1,10 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
+
 const {
   authMiddleware,
   allowRoles
@@ -20,7 +23,7 @@ const DAY_NAMES = {
   3: "Wednesday",
   4: "Thursday",
   5: "Friday",
-  6: "Saturday",
+  6: "Saturday"
 };
 
 const therapistProfileSchema = z.object({
@@ -48,74 +51,133 @@ const updateProfileStatusSchema = z.object({
   profileStatus: z.enum(["active", "inactive", "hidden"])
 });
 
-function getTherapistListDetails(db, therapistId) {
-  const services = (db.therapistServices || [])
-    .filter(function (assignment) {
-      return (
-        assignment.therapistId === therapistId && assignment.status === "active"
-      );
-    })
-    .map(function (assignment) {
-      const service = (db.services || []).find(function (item) {
-        return item.id === assignment.serviceId;
-      });
-
-      return {
-        id: assignment.serviceId,
-        name: service ? service.name : assignment.serviceId,
-        locationIds: assignment.locationIds || [],
-        appointmentTypes: assignment.appointmentTypes || [],
-      };
-    });
-
-  const availability = (db.therapistAvailability || [])
-    .filter(function (rule) {
-      return (
-        rule.therapistId === therapistId &&
-        rule.status !== "inactive" &&
-        rule.status !== "archived"
-      );
-    })
-    .map(function (rule) {
-      const locationIds =
-        rule.locationIds || (rule.locationId ? [rule.locationId] : []);
-
-      const locations = locationIds.map(function (locationId) {
-        const location = (db.locations || []).find(function (item) {
-          return item.id === locationId;
-        });
-
-        return {
-          id: locationId,
-          name: location ? location.name : locationId,
-        };
-      });
-
-      return {
-        id: rule.id,
-        dayOfWeek: rule.dayOfWeek,
-        dayName: DAY_NAMES[rule.dayOfWeek],
-        startTime: rule.startTime,
-        endTime: rule.endTime,
-        locationIds,
-        locations,
-        appointmentTypes: rule.appointmentTypes || [],
-        status: rule.status,
-      };
-    });
-
-  return { services, availability };
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
 }
 
-function sanitizeTherapistProfile(profile, user, db) {
-  const details = db
-    ? getTherapistListDetails(db, profile.id)
-    : { services: [], availability: [] };
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
+}
+
+function therapistToJson(profile) {
+  return {
+    id: profile.id,
+    userId: profile.userId,
+    title: profile.title || "",
+    phone: profile.phone || "",
+    licenseNumber: profile.licenseNumber || "",
+    bio: profile.bio || "",
+    appointmentTypes: profile.appointmentTypes || [],
+    focusAreas: profile.focusAreas || [],
+    treatmentApproaches: profile.treatmentApproaches || [],
+    clientFocus: profile.clientFocus || [],
+    assessmentTypes: profile.assessmentTypes || [],
+    insuranceAccepted: profile.insuranceAccepted || false,
+    isPublicBookingEnabled: profile.isPublicBookingEnabled || false,
+    profileStatus: profile.profileStatus || "active",
+    createdAt: toIso(profile.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(profile.updatedAt)
+  };
+}
+
+function upsertJsonTherapist(profile) {
+  try {
+    const db = loadDB();
+
+    if (!db.therapists) {
+      db.therapists = [];
+    }
+
+    const existingIndex = db.therapists.findIndex(function (item) {
+      return item.id === profile.id;
+    });
+
+    const jsonTherapist = therapistToJson(profile);
+
+    if (existingIndex >= 0) {
+      db.therapists[existingIndex] = {
+        ...db.therapists[existingIndex],
+        ...jsonTherapist
+      };
+    } else {
+      db.therapists.push(jsonTherapist);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json therapist sync failed:", error);
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || ""
+      }
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
+}
+
+async function getLocationNameMap(locationIds) {
+  const uniqueIds = Array.from(new Set((locationIds || []).filter(Boolean)));
+
+  if (uniqueIds.length === 0) {
+    return {};
+  }
+
+  const locations = await prisma.location.findMany({
+    where: {
+      id: {
+        in: uniqueIds
+      }
+    },
+    select: {
+      id: true,
+      name: true
+    }
+  });
+
+  return locations.reduce(function (map, location) {
+    map[location.id] = location.name;
+    return map;
+  }, {});
+}
+
+async function sanitizeTherapistProfile(profile) {
+  const user = profile.user || null;
+  const services = profile.services || [];
+  const availability = profile.availability || [];
+
+  const availabilityLocationIds = [];
+
+  availability.forEach(function (rule) {
+    const ids = rule.locationIds || (rule.locationId ? [rule.locationId] : []);
+
+    ids.forEach(function (locationId) {
+      availabilityLocationIds.push(locationId);
+    });
+  });
+
+  const locationNameMap = await getLocationNameMap(availabilityLocationIds);
 
   return {
     id: profile.id,
     userId: profile.userId,
-    name: user ? user.name : profile.name,
+    name: user ? user.name : null,
     email: user ? user.email : null,
     userStatus: user ? user.status : null,
     title: profile.title,
@@ -123,8 +185,45 @@ function sanitizeTherapistProfile(profile, user, db) {
     licenseNumber: profile.licenseNumber,
     bio: profile.bio,
     appointmentTypes: profile.appointmentTypes || [],
-    services: details.services,
-    availability: details.availability,
+    services: services
+      .filter(function (assignment) {
+        return assignment.status === "active";
+      })
+      .map(function (assignment) {
+        return {
+          id: assignment.serviceId,
+          name: assignment.service ? assignment.service.name : assignment.serviceId,
+          locationIds: assignment.locationIds || [],
+          appointmentTypes: assignment.appointmentTypes || []
+        };
+      }),
+    availability: availability
+      .filter(function (rule) {
+        return rule.status !== "inactive" && rule.status !== "archived";
+      })
+      .map(function (rule) {
+        const locationIds =
+          rule.locationIds || (rule.locationId ? [rule.locationId] : []);
+
+        const locations = locationIds.map(function (locationId) {
+          return {
+            id: locationId,
+            name: locationNameMap[locationId] || locationId
+          };
+        });
+
+        return {
+          id: rule.id,
+          dayOfWeek: rule.dayOfWeek,
+          dayName: DAY_NAMES[rule.dayOfWeek],
+          startTime: rule.startTime,
+          endTime: rule.endTime,
+          locationIds,
+          locations,
+          appointmentTypes: rule.appointmentTypes || [],
+          status: rule.status
+        };
+      }),
     focusAreas: profile.focusAreas || [],
     treatmentApproaches: profile.treatmentApproaches || [],
     clientFocus: profile.clientFocus || [],
@@ -133,7 +232,21 @@ function sanitizeTherapistProfile(profile, user, db) {
     isPublicBookingEnabled: profile.isPublicBookingEnabled || false,
     profileStatus: profile.profileStatus,
     createdAt: profile.createdAt,
-    updatedAt: profile.updatedAt || null,
+    updatedAt: profile.updatedAt || null
+  };
+}
+
+function publicTherapistResponse(therapist) {
+  return {
+    id: therapist.id,
+    userId: therapist.userId,
+    name: therapist.user ? therapist.user.name : null,
+    email: therapist.user ? therapist.user.email : null,
+    title: therapist.title,
+    bio: therapist.bio,
+    focusAreas: therapist.focusAreas || [],
+    treatmentApproaches: therapist.treatmentApproaches || [],
+    appointmentTypes: therapist.appointmentTypes || []
   };
 }
 
@@ -142,22 +255,42 @@ router.get(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
-
-    const therapists = db.therapists.map(function (profile) {
-      const user = db.users.find(function (item) {
-        return item.id === profile.userId;
+  async function (req, res) {
+    try {
+      const therapistProfiles = await prisma.therapist.findMany({
+        include: {
+          user: true,
+          services: {
+            include: {
+              service: true
+            }
+          },
+          availability: true
+        },
+        orderBy: {
+          createdAt: "desc"
+        }
       });
 
-      return sanitizeTherapistProfile(profile, user, db);
-    });
+      const therapists = await Promise.all(
+        therapistProfiles.map(function (profile) {
+          return sanitizeTherapistProfile(profile);
+        })
+      );
 
-    return res.json({
-      success: true,
-      count: therapists.length,
-      therapists
-    });
+      return res.json({
+        success: true,
+        count: therapists.length,
+        therapists
+      });
+    } catch (error) {
+      console.error("Get therapists error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load therapists"
+      });
+    }
   }
 );
 
@@ -166,28 +299,42 @@ router.get(
   "/me",
   authMiddleware,
   allowRoles(USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const profile = await prisma.therapist.findUnique({
+        where: {
+          userId: req.user.id
+        },
+        include: {
+          user: true,
+          services: {
+            include: {
+              service: true
+            }
+          },
+          availability: true
+        }
+      });
 
-    const profile = db.therapists.find(function (item) {
-      return item.userId === req.user.id;
-    });
+      if (!profile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
 
-    if (!profile) {
-      return res.status(404).json({
+      return res.json({
+        success: true,
+        therapist: await sanitizeTherapistProfile(profile)
+      });
+    } catch (error) {
+      console.error("Get therapist me error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Failed to load therapist profile"
       });
     }
-
-    const user = db.users.find(function (item) {
-      return item.id === profile.userId;
-    });
-
-    return res.json({
-      success: true,
-      therapist: sanitizeTherapistProfile(profile, user, db)
-    });
   }
 );
 
@@ -196,71 +343,87 @@ router.get(
   "/public",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const serviceId = req.query.serviceId;
+      const locationId = req.query.locationId;
+      const appointmentType = req.query.appointmentType;
 
-    const serviceId = req.query.serviceId;
-    const locationId = req.query.locationId;
-    const appointmentType = req.query.appointmentType;
+      const where = {
+        profileStatus: "active",
+        isPublicBookingEnabled: true
+      };
 
-    let therapists = db.therapists.filter(function (therapist) {
-      return (
-        therapist.profileStatus === "active" &&
-        therapist.isPublicBookingEnabled === true
-      );
-    });
+      if (serviceId || locationId || appointmentType) {
+        where.services = {
+          some: {
+            status: "active",
+            ...(serviceId
+              ? {
+                serviceId
+              }
+              : {}),
+            ...(locationId
+              ? {
+                OR: [
+                  {
+                    locationIds: {
+                      has: locationId
+                    }
+                  },
+                  {
+                    locationIds: {
+                      isEmpty: true
+                    }
+                  }
+                ]
+              }
+              : {}),
+            ...(appointmentType
+              ? {
+                OR: [
+                  {
+                    appointmentTypes: {
+                      has: appointmentType
+                    }
+                  },
+                  {
+                    appointmentTypes: {
+                      isEmpty: true
+                    }
+                  }
+                ]
+              }
+              : {})
+          }
+        };
+      }
 
-    if (serviceId || locationId || appointmentType) {
-      therapists = therapists.filter(function (therapist) {
-        return (db.therapistServices || []).some(function (assignment) {
-          const serviceMatches = !serviceId || assignment.serviceId === serviceId;
+      const therapists = await prisma.therapist.findMany({
+        where,
+        include: {
+          user: true
+        },
+        orderBy: {
+          createdAt: "desc"
+        }
+      });
 
-          const locationMatches =
-            !locationId ||
-            !assignment.locationIds ||
-            assignment.locationIds.length === 0 ||
-            assignment.locationIds.includes(locationId);
+      const result = therapists.map(publicTherapistResponse);
 
-          const appointmentTypeMatches =
-            !appointmentType ||
-            !assignment.appointmentTypes ||
-            assignment.appointmentTypes.length === 0 ||
-            assignment.appointmentTypes.includes(appointmentType);
+      return res.json({
+        success: true,
+        count: result.length,
+        therapists: result
+      });
+    } catch (error) {
+      console.error("Get public therapists error:", error);
 
-          return (
-            assignment.therapistId === therapist.id &&
-            assignment.status === "active" &&
-            serviceMatches &&
-            locationMatches &&
-            appointmentTypeMatches
-          );
-        });
+      return res.status(500).json({
+        success: false,
+        message: "Failed to load public therapists"
       });
     }
-
-    const result = therapists.map(function (therapist) {
-      const user = db.users.find(function (item) {
-        return item.id === therapist.userId;
-      });
-
-      return {
-        id: therapist.id,
-        userId: therapist.userId,
-        name: user ? user.name : null,
-        email: user ? user.email : null,
-        title: therapist.title,
-        bio: therapist.bio,
-        focusAreas: therapist.focusAreas || [],
-        treatmentApproaches: therapist.treatmentApproaches || [],
-        appointmentTypes: therapist.appointmentTypes || []
-      };
-    });
-
-    return res.json({
-      success: true,
-      count: result.length,
-      therapists: result
-    });
   }
 );
 
@@ -269,35 +432,52 @@ router.get(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    try {
+      const profile = await prisma.therapist.findUnique({
+        where: {
+          id: req.params.id
+        },
+        include: {
+          user: true,
+          services: {
+            include: {
+              service: true
+            }
+          },
+          availability: true
+        }
+      });
 
-    const profile = db.therapists.find(function (item) {
-      return item.id === req.params.id;
-    });
+      if (!profile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
 
-    if (!profile) {
-      return res.status(404).json({
+      if (
+        req.user.role === USER_ROLES.THERAPIST &&
+        profile.userId !== req.user.id
+      ) {
+        return res.status(403).json({
+          success: false,
+          message: "You can only view your own therapist profile"
+        });
+      }
+
+      return res.json({
+        success: true,
+        therapist: await sanitizeTherapistProfile(profile)
+      });
+    } catch (error) {
+      console.error("Get single therapist error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Therapist profile not found"
+        message: "Failed to load therapist profile"
       });
     }
-
-    if (req.user.role === USER_ROLES.THERAPIST && profile.userId !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: "You can only view your own therapist profile"
-      });
-    }
-
-    const user = db.users.find(function (item) {
-      return item.id === profile.userId;
-    });
-
-    return res.json({
-      success: true,
-      therapist: sanitizeTherapistProfile(profile, user, db)
-    });
   }
 );
 
@@ -306,81 +486,101 @@ router.post(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = therapistProfileSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = therapistProfileSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten()
+        });
+      }
+
+      const therapistUser = await prisma.user.findUnique({
+        where: {
+          id: result.data.userId
+        }
+      });
+
+      if (!therapistUser) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist user not found"
+        });
+      }
+
+      if (therapistUser.role !== USER_ROLES.THERAPIST) {
+        return res.status(400).json({
+          success: false,
+          message: "Selected user is not a therapist"
+        });
+      }
+
+      const existingProfile = await prisma.therapist.findUnique({
+        where: {
+          userId: result.data.userId
+        }
+      });
+
+      if (existingProfile) {
+        return res.status(400).json({
+          success: false,
+          message: "Therapist profile already exists for this user"
+        });
+      }
+
+      const profile = await prisma.therapist.create({
+        data: {
+          id: createId("therapist"),
+          userId: result.data.userId,
+          title: result.data.title || "",
+          phone: result.data.phone || "",
+          licenseNumber: result.data.licenseNumber || "",
+          bio: result.data.bio || "",
+          appointmentTypes: result.data.appointmentTypes || [],
+          focusAreas: result.data.focusAreas || [],
+          treatmentApproaches: result.data.treatmentApproaches || [],
+          clientFocus: result.data.clientFocus || [],
+          assessmentTypes: result.data.assessmentTypes || [],
+          insuranceAccepted: result.data.insuranceAccepted || false,
+          isPublicBookingEnabled: result.data.isPublicBookingEnabled || false,
+          profileStatus: "active"
+        },
+        include: {
+          user: true,
+          services: {
+            include: {
+              service: true
+            }
+          },
+          availability: true
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonTherapist(profile);
+
+      await addPrismaAuditLog(
+        "THERAPIST_PROFILE_CREATED",
+        req.user.email,
+        `Created therapist profile for ${therapistUser.email}`
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Therapist profile created successfully",
+        therapist: await sanitizeTherapistProfile(profile)
+      });
+    } catch (error) {
+      console.error("Create therapist profile error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
+        message: "Failed to create therapist profile"
       });
     }
-
-    const db = loadDB();
-
-    const therapistUser = db.users.find(function (user) {
-      return user.id === result.data.userId;
-    });
-
-    if (!therapistUser) {
-      return res.status(404).json({
-        success: false,
-        message: "Therapist user not found"
-      });
-    }
-
-    if (therapistUser.role !== USER_ROLES.THERAPIST) {
-      return res.status(400).json({
-        success: false,
-        message: "Selected user is not a therapist"
-      });
-    }
-
-    const existingProfile = db.therapists.find(function (profile) {
-      return profile.userId === result.data.userId;
-    });
-
-    if (existingProfile) {
-      return res.status(400).json({
-        success: false,
-        message: "Therapist profile already exists for this user"
-      });
-    }
-
-    const profile = {
-      id: Date.now().toString(),
-      userId: result.data.userId,
-      title: result.data.title || "",
-      phone: result.data.phone || "",
-      licenseNumber: result.data.licenseNumber || "",
-      bio: result.data.bio || "",
-      appointmentTypes: result.data.appointmentTypes || [],
-      focusAreas: result.data.focusAreas || [],
-      treatmentApproaches: result.data.treatmentApproaches || [],
-      clientFocus: result.data.clientFocus || [],
-      assessmentTypes: result.data.assessmentTypes || [],
-      insuranceAccepted: result.data.insuranceAccepted || false,
-      isPublicBookingEnabled: result.data.isPublicBookingEnabled || false,
-      profileStatus: "active",
-      createdAt: new Date().toISOString(),
-      updatedAt: null
-    };
-
-    db.therapists.push(profile);
-    saveDB(db);
-
-    addAuditLog(
-      "THERAPIST_PROFILE_CREATED",
-      req.user.email,
-      `Created therapist profile for ${therapistUser.email}`
-    );
-
-    return res.status(201).json({
-      success: true,
-      message: "Therapist profile created successfully",
-      therapist: sanitizeTherapistProfile(profile, therapistUser)
-    });
   }
 );
 
@@ -389,69 +589,93 @@ router.patch(
   "/:id",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateTherapistProfileSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateTherapistProfileSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid input",
-        errors: result.error.flatten()
-      });
-    }
-
-    const db = loadDB();
-
-    const profile = db.therapists.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        message: "Therapist profile not found"
-      });
-    }
-
-    const allowedFields = [
-      "title",
-      "phone",
-      "licenseNumber",
-      "bio",
-      "appointmentTypes",
-      "focusAreas",
-      "treatmentApproaches",
-      "clientFocus",
-      "assessmentTypes",
-      "insuranceAccepted",
-      "isPublicBookingEnabled"
-    ];
-
-    allowedFields.forEach(function (field) {
-      if (Object.prototype.hasOwnProperty.call(result.data, field)) {
-        profile[field] = result.data[field];
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid input",
+          errors: result.error.flatten()
+        });
       }
-    });
 
-    profile.updatedAt = new Date().toISOString();
+      const profile = await prisma.therapist.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
 
-    saveDB(db);
+      if (!profile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
 
-    const therapistUser = db.users.find(function (user) {
-      return user.id === profile.userId;
-    });
+      const allowedFields = [
+        "title",
+        "phone",
+        "licenseNumber",
+        "bio",
+        "appointmentTypes",
+        "focusAreas",
+        "treatmentApproaches",
+        "clientFocus",
+        "assessmentTypes",
+        "insuranceAccepted",
+        "isPublicBookingEnabled"
+      ];
 
-    addAuditLog(
-      "THERAPIST_PROFILE_UPDATED",
-      req.user.email,
-      `Updated therapist profile ${profile.id}`
-    );
+      const updateData = {};
 
-    return res.json({
-      success: true,
-      message: "Therapist profile updated successfully",
-      therapist: sanitizeTherapistProfile(profile, therapistUser)
-    });
+      allowedFields.forEach(function (field) {
+        if (Object.prototype.hasOwnProperty.call(result.data, field)) {
+          updateData[field] = result.data[field];
+        }
+      });
+
+      updateData.updatedAt = new Date();
+
+      const updatedProfile = await prisma.therapist.update({
+        where: {
+          id: profile.id
+        },
+        data: updateData,
+        include: {
+          user: true,
+          services: {
+            include: {
+              service: true
+            }
+          },
+          availability: true
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonTherapist(updatedProfile);
+
+      await addPrismaAuditLog(
+        "THERAPIST_PROFILE_UPDATED",
+        req.user.email,
+        `Updated therapist profile ${updatedProfile.id}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Therapist profile updated successfully",
+        therapist: await sanitizeTherapistProfile(updatedProfile)
+      });
+    } catch (error) {
+      console.error("Update therapist profile error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Failed to update therapist profile"
+      });
+    }
   }
 );
 
@@ -460,115 +684,73 @@ router.patch(
   "/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const result = updateProfileStatusSchema.safeParse(req.body);
+  async function (req, res) {
+    try {
+      const result = updateProfileStatusSchema.safeParse(req.body);
 
-    if (!result.success) {
-      return res.status(400).json({
+      if (!result.success) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid status",
+          errors: result.error.flatten()
+        });
+      }
+
+      const profile = await prisma.therapist.findUnique({
+        where: {
+          id: req.params.id
+        }
+      });
+
+      if (!profile) {
+        return res.status(404).json({
+          success: false,
+          message: "Therapist profile not found"
+        });
+      }
+
+      const updatedProfile = await prisma.therapist.update({
+        where: {
+          id: profile.id
+        },
+        data: {
+          profileStatus: result.data.profileStatus,
+          updatedAt: new Date()
+        },
+        include: {
+          user: true,
+          services: {
+            include: {
+              service: true
+            }
+          },
+          availability: true
+        }
+      });
+
+      // Temporary sync while remaining scheduling modules still use db.json
+      upsertJsonTherapist(updatedProfile);
+
+      await addPrismaAuditLog(
+        "THERAPIST_PROFILE_STATUS_UPDATED",
+        req.user.email,
+        `Changed therapist profile ${updatedProfile.id} status to ${updatedProfile.profileStatus}`
+      );
+
+      return res.json({
+        success: true,
+        message: "Therapist profile status updated successfully",
+        therapist: await sanitizeTherapistProfile(updatedProfile)
+      });
+    } catch (error) {
+      console.error("Update therapist profile status error:", error);
+
+      return res.status(500).json({
         success: false,
-        message: "Invalid status",
-        errors: result.error.flatten()
+        message: "Failed to update therapist profile status"
       });
     }
-
-    const db = loadDB();
-
-    const profile = db.therapists.find(function (item) {
-      return item.id === req.params.id;
-    });
-
-    if (!profile) {
-      return res.status(404).json({
-        success: false,
-        message: "Therapist profile not found"
-      });
-    }
-
-    profile.profileStatus = result.data.profileStatus;
-    profile.updatedAt = new Date().toISOString();
-
-    saveDB(db);
-
-    const therapistUser = db.users.find(function (user) {
-      return user.id === profile.userId;
-    });
-
-    addAuditLog(
-      "THERAPIST_PROFILE_STATUS_UPDATED",
-      req.user.email,
-      `Changed therapist profile ${profile.id} status to ${profile.profileStatus}`
-    );
-
-    return res.json({
-      success: true,
-      message: "Therapist profile status updated successfully",
-      therapist: sanitizeTherapistProfile(profile, therapistUser)
-    });
   }
 );
-
-// GET public therapists for booking
-router.get("/public", authMiddleware, function (req, res) {
-  const db = loadDB();
-
-  const serviceId = req.query.serviceId;
-  const locationId = req.query.locationId;
-  const appointmentType = req.query.appointmentType;
-
-  let therapists = db.therapists.filter(function (therapist) {
-    return (
-      therapist.profileStatus === "active" &&
-      therapist.isPublicBookingEnabled === true
-    );
-  });
-
-  if (serviceId || locationId || appointmentType) {
-    therapists = therapists.filter(function (therapist) {
-      return db.therapistServices.some(function (assignment) {
-        const serviceMatches = !serviceId || assignment.serviceId === serviceId;
-
-        const locationMatches =
-          !locationId ||
-          (assignment.locationIds || []).includes(locationId);
-
-        const appointmentTypeMatches =
-          !appointmentType ||
-          (assignment.appointmentTypes || []).includes(appointmentType);
-
-        return (
-          assignment.therapistId === therapist.id &&
-          assignment.status === "active" &&
-          serviceMatches &&
-          locationMatches &&
-          appointmentTypeMatches
-        );
-      });
-    });
-  }
-
-  const result = therapists.map(function (therapist) {
-    const user = db.users.find(function (item) {
-      return item.id === therapist.userId;
-    });
-
-    return {
-      id: therapist.id,
-      userId: therapist.userId,
-      name: user ? user.name : null,
-      email: user ? user.email : null,
-      title: therapist.title,
-      bio: therapist.bio,
-      focusAreas: therapist.focusAreas || [],
-      treatmentApproaches: therapist.treatmentApproaches || [],
-      appointmentTypes: therapist.appointmentTypes || []
-    };
-  });
-
-  return res.json({
-    success: true,
-    count: result.length,
-    therapists: result
-  });
-});
 
 module.exports = router;
