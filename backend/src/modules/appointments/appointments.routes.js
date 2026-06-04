@@ -1,7 +1,9 @@
 const express = require("express");
 const { z } = require("zod");
+const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
+const prisma = require("../../config/prisma");
+const { loadDB, saveDB } = require("../../utils/db");
 const {
   authMiddleware,
   allowRoles,
@@ -17,6 +19,141 @@ const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 // For MVP/demo we use California offset.
 // Later we will replace this with proper timezone library like luxon/date-fns-tz.
 const DEFAULT_TIMEZONE_OFFSET = "-07:00";
+
+function createId(prefix) {
+  return `${prefix}-${crypto.randomUUID()}`;
+}
+
+function toIso(value) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
+}
+
+function serializePrismaRecord(record) {
+  const output = {};
+
+  Object.keys(record).forEach(function (key) {
+    output[key] = toIso(record[key]);
+  });
+
+  return output;
+}
+
+async function loadSchedulingSnapshot() {
+  const [
+    users,
+    therapists,
+    services,
+    locations,
+    rooms,
+    therapistServices,
+    therapistAvailability,
+    therapistTimeOff,
+    appointments,
+    waitlist
+  ] = await Promise.all([
+    prisma.user.findMany(),
+    prisma.therapist.findMany(),
+    prisma.service.findMany(),
+    prisma.location.findMany(),
+    prisma.room.findMany(),
+    prisma.therapistService.findMany(),
+    prisma.therapistAvailability.findMany(),
+    prisma.therapistTimeOff.findMany(),
+    prisma.appointment.findMany(),
+    prisma.waitlist.findMany()
+  ]);
+
+  return {
+    users: users.map(serializePrismaRecord),
+    therapists: therapists.map(serializePrismaRecord),
+    services: services.map(serializePrismaRecord),
+    locations: locations.map(serializePrismaRecord),
+    rooms: rooms.map(serializePrismaRecord),
+    therapistServices: therapistServices.map(serializePrismaRecord),
+    therapistAvailability: therapistAvailability.map(serializePrismaRecord),
+    therapistTimeOff: therapistTimeOff.map(serializePrismaRecord),
+    appointments: appointments.map(serializePrismaRecord),
+    waitlist: waitlist.map(serializePrismaRecord)
+  };
+}
+
+function appointmentToJson(appointment) {
+  return {
+    id: appointment.id,
+    clientId: appointment.clientId,
+    therapistId: appointment.therapistId,
+    serviceId: appointment.serviceId,
+    locationId: appointment.locationId,
+    roomId: appointment.roomId || null,
+    appointmentType: appointment.appointmentType,
+    date: appointment.date,
+    startTime: appointment.startTime,
+    endTime: appointment.endTime,
+    blockedStartTime: appointment.blockedStartTime || null,
+    blockedEndTime: appointment.blockedEndTime || null,
+    startDateTime: appointment.startDateTime || null,
+    endDateTime: appointment.endDateTime || null,
+    status: appointment.status,
+    priceSnapshot: appointment.priceSnapshot || 0,
+    currencySnapshot: appointment.currencySnapshot || "USD",
+    notes: appointment.notes || "",
+    createdBy: appointment.createdBy || "",
+    createdAt: toIso(appointment.createdAt) || new Date().toISOString(),
+    updatedAt: toIso(appointment.updatedAt)
+  };
+}
+
+function upsertJsonAppointment(appointment) {
+  try {
+    const db = loadDB();
+
+    if (!db.appointments) {
+      db.appointments = [];
+    }
+
+    const existingIndex = db.appointments.findIndex(function (item) {
+      return item.id === appointment.id;
+    });
+
+    const jsonAppointment = appointmentToJson(appointment);
+
+    if (existingIndex >= 0) {
+      db.appointments[existingIndex] = {
+        ...db.appointments[existingIndex],
+        ...jsonAppointment
+      };
+    } else {
+      db.appointments.push(jsonAppointment);
+    }
+
+    saveDB(db);
+  } catch (error) {
+    console.error("Temporary db.json appointment sync failed:", error);
+  }
+}
+
+async function addPrismaAuditLog(action, performedBy, details) {
+  try {
+    await prisma.auditLog.create({
+      data: {
+        id: createId("audit"),
+        action,
+        performedBy: performedBy || "",
+        details: details || ""
+      }
+    });
+  } catch (error) {
+    console.error("Prisma audit log failed:", error);
+  }
+}
 
 const slotQuerySchema = z.object({
   date: z.string().regex(DATE_REGEX, "Use YYYY-MM-DD format"),
@@ -666,7 +803,7 @@ router.get(
   "/slots",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
+  async function (req, res) {
     const result = slotQuerySchema.safeParse(req.query);
 
     if (!result.success) {
@@ -677,7 +814,7 @@ router.get(
       });
     }
 
-    const db = loadDB();
+    const db = await loadSchedulingSnapshot();
 
     const service = getActiveService(db, result.data.serviceId);
     if (!service) {
@@ -710,7 +847,7 @@ router.post(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
+  async function (req, res) {
     const result = createAppointmentSchema.safeParse(req.body);
 
     if (!result.success) {
@@ -721,7 +858,8 @@ router.post(
       });
     }
 
-    const db = loadDB();
+    
+    const db = await loadSchedulingSnapshot();
 
     const service = getActiveService(db, result.data.serviceId);
     if (!service) {
@@ -821,7 +959,7 @@ router.post(
     const now = new Date().toISOString();
 
     const appointment = {
-      id: Date.now().toString(),
+      id: createId("appointment"),
       clientId,
       therapistId: assignedTherapist.id,
       serviceId: service.id,
@@ -844,13 +982,40 @@ router.post(
       updatedAt: null,
     };
 
-    db.appointments.push(appointment);
-    saveDB(db);
+    const savedAppointment = await prisma.appointment.create({
+      data: {
+        id: appointment.id,
+        clientId: appointment.clientId,
+        therapistId: appointment.therapistId,
+        serviceId: appointment.serviceId,
+        locationId: appointment.locationId,
+        roomId: appointment.roomId,
+        appointmentType: appointment.appointmentType,
+        date: appointment.date,
+        startTime: appointment.startTime,
+        endTime: appointment.endTime,
+        blockedStartTime: appointment.blockedStartTime,
+        blockedEndTime: appointment.blockedEndTime,
+        startDateTime: appointment.startDateTime,
+        endDateTime: appointment.endDateTime,
+        status: appointment.status,
+        priceSnapshot: appointment.priceSnapshot,
+        currencySnapshot: appointment.currencySnapshot,
+        notes: appointment.notes,
+        createdBy: appointment.createdBy
+      }
+    });
 
-    addAuditLog(
+    appointment.createdAt = toIso(savedAppointment.createdAt);
+    appointment.updatedAt = toIso(savedAppointment.updatedAt);
+
+    db.appointments.push(appointment);
+    upsertJsonAppointment(savedAppointment);
+
+    await addPrismaAuditLog(
       "APPOINTMENT_CREATED",
       req.user.email,
-      `Appointment booked for client ${client.email} with therapist profile ${assignedTherapist.id}`,
+      `Appointment booked for client ${client.email} with therapist profile ${assignedTherapist.id}`
     );
 
     return res.status(201).json({
@@ -866,8 +1031,8 @@ router.get(
   "/",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    const db = await loadSchedulingSnapshot();
 
     let appointments = db.appointments;
 
@@ -906,8 +1071,8 @@ router.get(
   "/me",
   authMiddleware,
   allowRoles(USER_ROLES.CLIENT, USER_ROLES.THERAPIST),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    const db = await loadSchedulingSnapshot();
 
     let appointments = [];
 
@@ -950,8 +1115,8 @@ router.get(
   "/debug-slots",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    const db = await loadSchedulingSnapshot();
 
     const date = req.query.date;
     const serviceId = req.query.serviceId;
@@ -1076,8 +1241,8 @@ router.get(
     USER_ROLES.CLIENT,
     USER_ROLES.THERAPIST,
   ),
-  function (req, res) {
-    const db = loadDB();
+  async function (req, res) {
+    const db = await loadSchedulingSnapshot();
 
     const appointment = db.appointments.find(function (item) {
       return item.id === req.params.id;
@@ -1129,7 +1294,7 @@ router.patch(
   "/:id/reschedule",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
+  async function (req, res) {
     const result = rescheduleAppointmentSchema.safeParse(req.body);
 
     if (!result.success) {
@@ -1140,7 +1305,7 @@ router.patch(
       });
     }
 
-    const db = loadDB();
+    const db = await loadSchedulingSnapshot();
 
     const appointment = db.appointments.find(function (item) {
       return item.id === req.params.id;
@@ -1374,12 +1539,34 @@ router.patch(
       appointment.notes = result.data.notes;
     }
 
-    saveDB(db);
+    const savedAppointment = await prisma.appointment.update({
+      where: {
+        id: appointment.id
+      },
+      data: {
+        therapistId: appointment.therapistId,
+        roomId: appointment.roomId || null,
+        date: appointment.date,
+        startTime: appointment.startTime,
+        endTime: appointment.endTime,
+        blockedStartTime: appointment.blockedStartTime,
+        blockedEndTime: appointment.blockedEndTime,
+        startDateTime: appointment.startDateTime,
+        endDateTime: appointment.endDateTime,
+        status: appointment.status,
+        notes: appointment.notes || "",
+        updatedAt: new Date()
+      }
+    });
 
-    addAuditLog(
+    appointment.updatedAt = toIso(savedAppointment.updatedAt);
+
+    upsertJsonAppointment(savedAppointment);
+
+    await addPrismaAuditLog(
       "APPOINTMENT_RESCHEDULED",
       req.user.email,
-      `Appointment ${appointment.id} rescheduled from ${oldSchedule.date} ${oldSchedule.startTime} to ${appointment.date} ${appointment.startTime}`,
+      `Appointment ${appointment.id} rescheduled from ${oldSchedule.date} ${oldSchedule.startTime} to ${appointment.date} ${appointment.startTime}`
     );
 
     const matchingWaitlist = getMatchingWaitlistForSlot(db, oldSchedule);
@@ -1400,7 +1587,7 @@ router.patch(
   "/:id/status",
   authMiddleware,
   allowRoles(USER_ROLES.ADMIN, USER_ROLES.OFFICE_MANAGER, USER_ROLES.CLIENT),
-  function (req, res) {
+  async function (req, res) {
     const result = updateAppointmentStatusSchema.safeParse(req.body);
 
     if (!result.success) {
@@ -1411,7 +1598,7 @@ router.patch(
       });
     }
 
-    const db = loadDB();
+    const db = await loadSchedulingSnapshot();
 
     const appointment = db.appointments.find(function (item) {
       return item.id === req.params.id;
@@ -1456,12 +1643,25 @@ router.patch(
     appointment.statusReason = result.data.reason || "";
     appointment.updatedAt = new Date().toISOString();
 
-    saveDB(db);
+    const savedAppointment = await prisma.appointment.update({
+      where: {
+        id: appointment.id
+      },
+      data: {
+        status: appointment.status,
+        notes: appointment.notes || "",
+        updatedAt: new Date()
+      }
+    });
 
-    addAuditLog(
+    appointment.updatedAt = toIso(savedAppointment.updatedAt);
+
+    upsertJsonAppointment(savedAppointment);
+
+    await addPrismaAuditLog(
       "APPOINTMENT_STATUS_UPDATED",
       req.user.email,
-      `Appointment ${appointment.id} status changed to ${appointment.status}`,
+      `Appointment ${appointment.id} status changed to ${appointment.status}`
     );
 
     let matchingWaitlist = [];
