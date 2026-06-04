@@ -5,7 +5,6 @@ const jwt = require("jsonwebtoken");
 const { z } = require("zod");
 const crypto = require("crypto");
 
-const { loadDB, saveDB, addAuditLog } = require("../../utils/db");
 const { authMiddleware } = require("../../middleware/authMiddleware");
 const { USER_ROLES } = require("../users/user.roles");
 
@@ -102,31 +101,6 @@ router.post("/register", async function (req, res) {
       },
     });
 
-    // Temporary dual-write:
-    // Keep db.json updated until all other routes are migrated to PostgreSQL.
-    const db = loadDB();
-
-    const existingJsonUser = db.users.find(function (item) {
-      return item.email === email;
-    });
-
-    if (!existingJsonUser) {
-      db.users.push({
-        id: user.id,
-        name: user.name,
-        email: user.email,
-        password: user.password,
-        role: user.role,
-        status: user.status,
-        createdAt: user.createdAt
-          ? user.createdAt.toISOString()
-          : new Date().toISOString(),
-      });
-
-      saveDB(db);
-    }
-
-    addAuditLog("CLIENT_REGISTERED", email, "New client account created");
     await addPrismaAuditLog(
       "CLIENT_REGISTERED",
       email,
@@ -159,12 +133,9 @@ router.post("/register", async function (req, res) {
 
 router.post("/login", async function (req, res) {
   try {
-    console.log("LOGIN STEP 1: request received");
-
     const result = loginSchema.safeParse(req.body);
 
     if (!result.success) {
-      console.log("LOGIN STEP 1 FAILED: invalid input");
 
       return res.status(400).json({
         success: false,
@@ -176,15 +147,11 @@ router.post("/login", async function (req, res) {
     const email = normalizeEmail(result.data.email);
     const password = result.data.password;
 
-    console.log("LOGIN STEP 2: email normalized", email);
-
     const user = await prisma.user.findUnique({
       where: {
         email,
       },
     });
-
-    console.log("LOGIN STEP 3: user found", Boolean(user));
 
     if (!user) {
       return res.status(401).json({
@@ -200,11 +167,7 @@ router.post("/login", async function (req, res) {
       });
     }
 
-    console.log("LOGIN STEP 4: checking password");
-
     const isPasswordValid = await bcrypt.compare(password, user.password);
-
-    console.log("LOGIN STEP 5: password checked", isPasswordValid);
 
     if (!isPasswordValid) {
       return res.status(401).json({
@@ -214,8 +177,6 @@ router.post("/login", async function (req, res) {
     }
 
     const token = createToken(user);
-
-    console.log("LOGIN STEP 6: token created");
 
     return res.json({
       success: true,
