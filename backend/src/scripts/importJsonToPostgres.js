@@ -259,15 +259,13 @@ async function main() {
 
     console.log("Importing audit logs...");
     await prisma.auditLog.createMany({
-        data: (db.auditLogs || []).map((log) =>
-            withDateFields({
-                id: log.id,
-                action: log.action,
-                performedBy: log.performedBy || "",
-                details: log.details || "",
-                createdAt: log.createdAt,
-            })
-        ),
+        data: (db.auditLogs || []).map((log) => ({
+            id: log.id,
+            action: log.action,
+            performedBy: log.performedBy || "",
+            details: log.details || "",
+            createdAt: toDate(log.createdAt) || new Date(),
+        })),
     });
 
     console.log("Import finished successfully.");
