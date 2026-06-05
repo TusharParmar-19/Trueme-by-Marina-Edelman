@@ -186,3 +186,7 @@ out/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local demo database files
+backend/src/data/*.json
+!backend/src/data/.gitkeep
