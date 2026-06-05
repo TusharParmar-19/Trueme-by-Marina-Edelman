@@ -190,3 +190,7 @@ Thumbs.db
 # Local demo database files
 backend/src/data/*.json
 !backend/src/data/.gitkeep
+
+# Local Google Calendar helper/test scripts
+backend/src/scripts/getGoogleRefreshToken.js
+backend/src/scripts/testGoogleCalendarSync.js

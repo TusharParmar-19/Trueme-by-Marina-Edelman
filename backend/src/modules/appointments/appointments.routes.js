@@ -11,6 +11,11 @@ const {
 
 const { USER_ROLES } = require("../users/user.roles");
 
+const {
+  syncAppointmentToGoogle,
+  cancelAppointmentCalendarEvents,
+} = require("../../services/googleCalendar.service");
+
 const router = express.Router();
 
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/;
@@ -858,7 +863,7 @@ router.post(
       });
     }
 
-    
+
     const db = await loadSchedulingSnapshot();
 
     const service = getActiveService(db, result.data.serviceId);
@@ -1018,10 +1023,13 @@ router.post(
       `Appointment booked for client ${client.email} with therapist profile ${assignedTherapist.id}`
     );
 
+    const googleSyncResult = await syncAppointmentToGoogle(savedAppointment.id);
+
     return res.status(201).json({
       success: true,
       message: "Appointment booked successfully",
       appointment: sanitizeAppointment(appointment, db),
+      googleSync: googleSyncResult,
     });
   },
 );
@@ -1569,6 +1577,8 @@ router.patch(
       `Appointment ${appointment.id} rescheduled from ${oldSchedule.date} ${oldSchedule.startTime} to ${appointment.date} ${appointment.startTime}`
     );
 
+    const googleSyncResult = await syncAppointmentToGoogle(savedAppointment.id);
+
     const matchingWaitlist = getMatchingWaitlistForSlot(db, oldSchedule);
 
     return res.json({
@@ -1578,6 +1588,7 @@ router.patch(
       oldSchedule,
       matchingWaitlistCount: matchingWaitlist.length,
       matchingWaitlist,
+      googleSync: googleSyncResult,
     });
   },
 );
@@ -1664,10 +1675,14 @@ router.patch(
       `Appointment ${appointment.id} status changed to ${appointment.status}`
     );
 
+    let googleSyncResult = null;
     let matchingWaitlist = [];
 
     if (result.data.status === "cancelled") {
+      googleSyncResult = await cancelAppointmentCalendarEvents(savedAppointment.id);
       matchingWaitlist = getMatchingWaitlistForSlot(db, oldSlot);
+    } else {
+      googleSyncResult = await syncAppointmentToGoogle(savedAppointment.id);
     }
 
     return res.json({
@@ -1676,6 +1691,7 @@ router.patch(
       appointment: sanitizeAppointment(appointment, db),
       matchingWaitlistCount: matchingWaitlist.length,
       matchingWaitlist,
+      googleSync: googleSyncResult,
     });
   },
 );

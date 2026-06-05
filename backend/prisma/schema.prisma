@@ -8,23 +8,23 @@ datasource db {
 }
 
 model User {
-  id        String   @id
+  id        String    @id
   name      String
-  email     String   @unique
+  email     String    @unique
   password  String
   role      String
-  status    String   @default("active")
-  createdAt DateTime @default(now())
+  status    String    @default("active")
+  createdAt DateTime  @default(now())
   updatedAt DateTime?
 
-  therapistProfile Therapist?
+  therapistProfile   Therapist?
   clientAppointments Appointment[] @relation("ClientAppointments")
-  waitlistEntries Waitlist[] @relation("ClientWaitlist")
+  waitlistEntries    Waitlist[]    @relation("ClientWaitlist")
 }
 
 model Therapist {
-  id                     String   @id
-  userId                 String   @unique
+  id                     String    @id
+  userId                 String    @unique
   title                  String?
   phone                  String?
   licenseNumber          String?
@@ -34,56 +34,57 @@ model Therapist {
   treatmentApproaches    String[]
   clientFocus            String[]
   assessmentTypes        String[]
-  insuranceAccepted      Boolean  @default(false)
-  isPublicBookingEnabled Boolean  @default(true)
-  profileStatus          String   @default("active")
-  createdAt              DateTime @default(now())
+  insuranceAccepted      Boolean   @default(false)
+  isPublicBookingEnabled Boolean   @default(true)
+  profileStatus          String    @default("active")
+  googleCalendarId       String?
+  createdAt              DateTime  @default(now())
   updatedAt              DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
-  services TherapistService[]
-  availability TherapistAvailability[]
-  timeOff TherapistTimeOff[]
-  appointments Appointment[] @relation("TherapistAppointments")
+  services        TherapistService[]
+  availability    TherapistAvailability[]
+  timeOff         TherapistTimeOff[]
+  appointments    Appointment[]           @relation("TherapistAppointments")
   waitlistEntries Waitlist[]
 
   @@index([profileStatus])
 }
 
 model Service {
-  id                     String   @id
+  id                     String    @id
   name                   String
-  slug                   String?  @unique
+  slug                   String?   @unique
   category               String?
   description            String?
   durationMinutes        Int
-  bufferBeforeMinutes    Int      @default(0)
-  bufferAfterMinutes     Int      @default(0)
+  bufferBeforeMinutes    Int       @default(0)
+  bufferAfterMinutes     Int       @default(0)
   currentPrice           Float
-  currency               String   @default("USD")
+  currency               String    @default("USD")
   appointmentTypes       String[]
   allowedLocations       String[]
-  isPublicBookingEnabled Boolean  @default(true)
-  requiresCardOnFile     Boolean  @default(false)
+  isPublicBookingEnabled Boolean   @default(true)
+  requiresCardOnFile     Boolean   @default(false)
   cancellationPolicy     String?
-  status                 String   @default("active")
+  status                 String    @default("active")
   priceHistory           Json?
-  createdAt              DateTime @default(now())
+  createdAt              DateTime  @default(now())
   updatedAt              DateTime?
 
   therapistServices TherapistService[]
-  appointments Appointment[]
-  waitlistEntries Waitlist[]
+  appointments      Appointment[]
+  waitlistEntries   Waitlist[]
 
   @@index([status])
   @@index([isPublicBookingEnabled])
 }
 
 model Location {
-  id                     String   @id
+  id                     String    @id
   name                   String
-  slug                   String?  @unique
+  slug                   String?   @unique
   locationType           String
   addressLine1           String?
   addressLine2           String?
@@ -94,14 +95,14 @@ model Location {
   timezone               String?
   phone                  String?
   notes                  String?
-  isPublicBookingEnabled Boolean  @default(true)
-  status                 String   @default("active")
-  createdAt              DateTime @default(now())
+  isPublicBookingEnabled Boolean   @default(true)
+  status                 String    @default("active")
+  createdAt              DateTime  @default(now())
   updatedAt              DateTime?
 
-  rooms Room[]
-  availability TherapistAvailability[]
-  appointments Appointment[]
+  rooms           Room[]
+  availability    TherapistAvailability[]
+  appointments    Appointment[]
   waitlistEntries Waitlist[]
 
   @@index([status])
@@ -109,15 +110,15 @@ model Location {
 }
 
 model Room {
-  id         String   @id
+  id         String    @id
   locationId String
   name       String
-  status     String   @default("active")
+  status     String    @default("active")
   notes      String?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime  @default(now())
   updatedAt  DateTime?
 
-  location Location @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  location     Location      @relation(fields: [locationId], references: [id], onDelete: Cascade)
   appointments Appointment[]
 
   @@index([locationId])
@@ -125,25 +126,25 @@ model Room {
 }
 
 model TherapistService {
-  id               String   @id
+  id               String    @id
   therapistId      String
   serviceId        String
   locationIds      String[]
   appointmentTypes String[]
   notes            String?
-  status           String   @default("active")
-  createdAt        DateTime @default(now())
+  status           String    @default("active")
+  createdAt        DateTime  @default(now())
   updatedAt        DateTime?
 
   therapist Therapist @relation(fields: [therapistId], references: [id], onDelete: Cascade)
-  service Service @relation(fields: [serviceId], references: [id], onDelete: Cascade)
+  service   Service   @relation(fields: [serviceId], references: [id], onDelete: Cascade)
 
   @@unique([therapistId, serviceId])
   @@index([status])
 }
 
 model TherapistAvailability {
-  id               String   @id
+  id               String    @id
   therapistId      String
   dayOfWeek        Int
   startTime        String
@@ -152,12 +153,12 @@ model TherapistAvailability {
   locationIds      String[]
   appointmentTypes String[]
   notes            String?
-  status           String   @default("active")
-  createdAt        DateTime @default(now())
+  status           String    @default("active")
+  createdAt        DateTime  @default(now())
   updatedAt        DateTime?
 
   therapist Therapist @relation(fields: [therapistId], references: [id], onDelete: Cascade)
-  location Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  location  Location? @relation(fields: [locationId], references: [id], onDelete: SetNull)
 
   @@index([therapistId])
   @@index([dayOfWeek])
@@ -165,15 +166,15 @@ model TherapistAvailability {
 }
 
 model TherapistTimeOff {
-  id            String   @id
+  id            String    @id
   therapistId   String
   startDateTime String
   endDateTime   String
   type          String
   reason        String?
   notes         String?
-  status        String   @default("active")
-  createdAt     DateTime @default(now())
+  status        String    @default("active")
+  createdAt     DateTime  @default(now())
   updatedAt     DateTime?
 
   therapist Therapist @relation(fields: [therapistId], references: [id], onDelete: Cascade)
@@ -183,33 +184,38 @@ model TherapistTimeOff {
 }
 
 model Appointment {
-  id               String   @id
-  clientId         String
-  therapistId      String
-  serviceId        String
-  locationId       String
-  roomId           String?
-  appointmentType  String
-  date             String
-  startTime        String
-  endTime          String
-  blockedStartTime String?
-  blockedEndTime   String?
-  startDateTime    String?
-  endDateTime      String?
-  status           String   @default("confirmed")
-  priceSnapshot    Float?
-  currencySnapshot String?
-  notes            String?
-  createdBy        String?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime?
+  id                         String    @id
+  clientId                   String
+  therapistId                String
+  serviceId                  String
+  locationId                 String
+  roomId                     String?
+  appointmentType            String
+  date                       String
+  startTime                  String
+  endTime                    String
+  blockedStartTime           String?
+  blockedEndTime             String?
+  startDateTime              String?
+  endDateTime                String?
+  status                     String    @default("confirmed")
+  priceSnapshot              Float?
+  currencySnapshot           String?
+  notes                      String?
+  createdBy                  String?
+  googleCalendarEventId      String?
+  googleAdminCalendarEventId String?
+  googleSyncStatus           String?   @default("not_synced")
+  googleSyncError            String?
+  googleSyncedAt             DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime?
 
-  client User @relation("ClientAppointments", fields: [clientId], references: [id], onDelete: Cascade)
+  client    User      @relation("ClientAppointments", fields: [clientId], references: [id], onDelete: Cascade)
   therapist Therapist @relation("TherapistAppointments", fields: [therapistId], references: [id], onDelete: Cascade)
-  service Service @relation(fields: [serviceId], references: [id])
-  location Location @relation(fields: [locationId], references: [id])
-  room Room? @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  service   Service   @relation(fields: [serviceId], references: [id])
+  location  Location  @relation(fields: [locationId], references: [id])
+  room      Room?     @relation(fields: [roomId], references: [id], onDelete: SetNull)
 
   @@index([date])
   @@index([status])
@@ -219,7 +225,7 @@ model Appointment {
 }
 
 model Waitlist {
-  id                 String   @id
+  id                 String    @id
   clientId           String
   therapistId        String?
   serviceId          String
@@ -228,16 +234,16 @@ model Waitlist {
   preferredDate      String
   preferredStartTime String?
   preferredEndTime   String?
-  status             String   @default("active")
+  status             String    @default("active")
   notes              String?
   createdBy          String?
-  createdAt          DateTime @default(now())
+  createdAt          DateTime  @default(now())
   updatedAt          DateTime?
 
-  client User @relation("ClientWaitlist", fields: [clientId], references: [id], onDelete: Cascade)
+  client    User       @relation("ClientWaitlist", fields: [clientId], references: [id], onDelete: Cascade)
   therapist Therapist? @relation(fields: [therapistId], references: [id], onDelete: SetNull)
-  service Service @relation(fields: [serviceId], references: [id])
-  location Location @relation(fields: [locationId], references: [id])
+  service   Service    @relation(fields: [serviceId], references: [id])
+  location  Location   @relation(fields: [locationId], references: [id])
 
   @@index([status])
   @@index([preferredDate])
