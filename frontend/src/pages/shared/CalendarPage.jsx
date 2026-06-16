@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../../api/apiClient";
 import DashboardLayout from "../../layouts/DashboardLayout";
 
@@ -72,7 +73,24 @@ function getEventTime(event) {
   return `${event.startTime} - ${event.endTime}`;
 }
 
+function getInitials(name) {
+  return String(name || "")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "T";
+}
+
+function getBookingRoute(role) {
+  if (role === "admin") return "/admin/appointments";
+  if (role === "office_manager") return "/manager/appointments";
+  if (role === "client") return "/client";
+  return "";
+}
+
 function CalendarPage({ role }) {
+  const navigate = useNavigate();
   const [currentDate, setCurrentDate] = useState(new Date());
   const [events, setEvents] = useState([]);
   const [selectedDate, setSelectedDate] = useState(
@@ -174,16 +192,13 @@ function CalendarPage({ role }) {
 
   const selectedDateEvents = getEventsForDate(selectedDate);
 
-  return (
-    <DashboardLayout>
-      <div className="page-header">
-        <h1>{getRoleTitle(role)}</h1>
-        <p>
-          View appointments in calendar format. Calendar updates automatically
-          when new bookings are created.
-        </p>
-      </div>
+  const bookingRoute = getBookingRoute(role);
 
+  return (
+    <DashboardLayout
+      title={getRoleTitle(role)}
+      subtitle="View appointments in calendar format. Calendar updates automatically when new bookings are created."
+    >
       {error ? <div className="alert error">{error}</div> : null}
 
       <div className="card">
@@ -266,7 +281,11 @@ function CalendarPage({ role }) {
 
                 <div className="calendar-events">
                   {dayEvents.slice(0, 3).map((event) => (
-                    <div key={event.id} className="calendar-event-pill">
+                    <div
+                      key={event.id}
+                      className="calendar-event-pill interactive"
+                      title={`${event.startTime} ${event.clientName}`}
+                    >
                       {event.startTime} {event.clientName}
                     </div>
                   ))}
@@ -287,7 +306,20 @@ function CalendarPage({ role }) {
         <h2>Appointments on {selectedDate}</h2>
 
         {selectedDateEvents.length === 0 ? (
-          <p>No appointments on this date.</p>
+          <div className="empty-state">
+            <div className="empty-icon" aria-hidden="true">⌁</div>
+            <h3>No appointments on this date</h3>
+            <p>This date is clear. Create a booking when you need one.</p>
+            {bookingRoute ? (
+              <button
+                className="btn secondary small-btn"
+                type="button"
+                onClick={() => navigate(bookingRoute)}
+              >
+                Book one
+              </button>
+            ) : null}
+          </div>
         ) : (
           <table className="table">
             <thead>
@@ -311,7 +343,14 @@ function CalendarPage({ role }) {
                     <br />
                     <small>{event.clientEmail}</small>
                   </td>
-                  <td>{event.therapistName}</td>
+                  <td>
+                    <div className="avatar-name">
+                      <span className="initials-avatar">
+                        {getInitials(event.therapistName)}
+                      </span>
+                      <span>{event.therapistName}</span>
+                    </div>
+                  </td>
                   <td>{event.serviceName}</td>
                   <td>{event.locationName}</td>
                   <td>{event.roomName || "-"}</td>

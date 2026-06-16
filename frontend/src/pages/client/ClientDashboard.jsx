@@ -1,9 +1,17 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-
 import { apiRequest } from "../../api/apiClient";
-import { getUser, logout } from "../../utils/auth";
+import { getUser } from "../../utils/auth";
 import DashboardLayout from "../../layouts/DashboardLayout";
+
+
+function getInitials(name) {
+  return String(name || "")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "T";
+}
 
 function getRoomDisplay(appointment) {
   if (appointment.appointmentType === "telehealth") {
@@ -64,7 +72,6 @@ function getAppointmentTypeForLocation(location) {
 }
 
 function ClientDashboard() {
-  const navigate = useNavigate();
   const user = getUser();
 
   const [dashboard, setDashboard] = useState(null);
@@ -539,11 +546,6 @@ function ClientDashboard() {
     ) {
       setSlots([]);
     }
-  }
-
-  function handleLogout() {
-    logout();
-    navigate("/login");
   }
 
   function startReschedule(appointment) {
@@ -1112,7 +1114,14 @@ function ClientDashboard() {
                       <td>
                         {appointment.startTime} - {appointment.endTime}
                       </td>
-                      <td>{appointment.therapistName}</td>
+                      <td>
+                        <div className="avatar-name">
+                          <span className="initials-avatar">
+                            {getInitials(appointment.therapistName)}
+                          </span>
+                          <span>{appointment.therapistName}</span>
+                        </div>
+                      </td>
                       <td>{appointment.serviceName}</td>
                       <td>{appointment.locationName}</td>
                       <td>{getRoomDisplay(appointment)}</td>
@@ -1132,7 +1141,7 @@ function ClientDashboard() {
                             </button>
 
                             <button
-                              className="btn danger small-btn"
+                              className="btn danger ghost small-btn"
                               onClick={() => cancelAppointment(appointment.id)}
                             >
                               Cancel
@@ -1181,7 +1190,7 @@ function ClientDashboard() {
                         {entry.status === "active" ||
                         entry.status === "notified" ? (
                           <button
-                            className="btn danger small-btn"
+                            className="btn danger ghost small-btn"
                             onClick={() => cancelWaitlistEntry(entry.id)}
                           >
                             Cancel

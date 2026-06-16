@@ -1,9 +1,6 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-
 import { apiRequest } from "../../api/apiClient";
 import DashboardLayout from "../../layouts/DashboardLayout";
-import { getUser } from "../../utils/auth";
 
 function getRoomDisplay(appointment) {
   if (appointment.appointmentType === "telehealth") {
@@ -49,6 +46,15 @@ function getLocationType(location) {
   return "office";
 }
 
+function getInitials(name) {
+  return String(name || "")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "T";
+}
+
 function getAppointmentTypeForLocation(location) {
   const locationType = getLocationType(location);
 
@@ -64,10 +70,6 @@ function getAppointmentTypeForLocation(location) {
 }
 
 function AdminAppointments() {
-  const navigate = useNavigate();
-  const user = getUser();
-  const isManager = user?.role === "office_manager";
-
   const [appointments, setAppointments] = useState([]);
   const [clients, setClients] = useState([]);
   const [services, setServices] = useState([]);
@@ -78,6 +80,7 @@ function AdminAppointments() {
   const [loading, setLoading] = useState(true);
   const [slotLoading, setSlotLoading] = useState(false);
   const [bookingLoading, setBookingLoading] = useState(false);
+  const [isBookingOpen, setIsBookingOpen] = useState(false);
 
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
@@ -93,8 +96,8 @@ function AdminAppointments() {
   const [bookingForm, setBookingForm] = useState(defaultBookingForm);
 
   const [rescheduleForm, setRescheduleForm] = useState(null);
-const [rescheduleSlots, setRescheduleSlots] = useState([]);
-const [rescheduleLoading, setRescheduleLoading] = useState(false);
+  const [rescheduleSlots, setRescheduleSlots] = useState([]);
+  const [rescheduleLoading, setRescheduleLoading] = useState(false);
 
   async function loadAppointments(selectedDate = date) {
     setLoading(true);
@@ -228,6 +231,7 @@ const [rescheduleLoading, setRescheduleLoading] = useState(false);
 
       setMessage("Appointment booked successfully.");
       resetBookingFormAfterSuccess();
+      setIsBookingOpen(false);
 
       loadAppointments(date);
     } catch (err) {
@@ -423,143 +427,173 @@ async function submitReschedule(event) {
   // eslint-disable-next-line react-hooks/exhaustive-deps
 }, []);
 
+  const bookingFormMarkup = (
+    <form onSubmit={bookAppointment}>
+      <div className="form-grid">
+        <div>
+          <label>Client</label>
+          <select
+            className="input"
+            name="clientId"
+            value={bookingForm.clientId}
+            onChange={handleBookingChange}
+          >
+            <option value="">Select client</option>
+            {clients.map((client) => (
+              <option key={client.id} value={client.id}>
+                {client.name} ({client.email})
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label>Service</label>
+          <select
+            className="input"
+            name="serviceId"
+            value={bookingForm.serviceId}
+            onChange={handleBookingChange}
+          >
+            <option value="">Select service</option>
+            {services.map((service) => (
+              <option key={service.id} value={service.id}>
+                {service.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label>Location</label>
+          <select
+            className="input"
+            name="locationId"
+            value={bookingForm.locationId}
+            onChange={handleBookingChange}
+          >
+            <option value="">Select location</option>
+            {locations.map((location) => (
+              <option key={location.id} value={location.id}>
+                {location.name}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div>
+          <label>Appointment Type</label>
+          <select
+            className="input"
+            name="appointmentType"
+            value={bookingForm.appointmentType}
+            onChange={handleBookingChange}
+            disabled
+          >
+            <option value="telehealth">Telehealth</option>
+            <option value="in_person">In Person</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="form-actions">
+        <button
+          className="btn secondary"
+          type="button"
+          onClick={checkSlots}
+          disabled={slotLoading}
+        >
+          {slotLoading ? "Checking..." : "Check Slots"}
+        </button>
+
+        <select
+          className="input slot-select"
+          name="startTime"
+          value={bookingForm.startTime}
+          onChange={handleBookingChange}
+        >
+          <option value="">Select slot</option>
+          {slots.map((slot) => (
+            <option key={slot.startTime} value={slot.startTime}>
+              {slot.startTime} - {slot.endTime} (
+              {slot.availableTherapistCount} therapist available)
+            </option>
+          ))}
+        </select>
+
+        <button className="btn" type="submit" disabled={bookingLoading}>
+          {bookingLoading ? "Booking..." : "Book Appointment"}
+        </button>
+      </div>
+    </form>
+  );
+
   return (
     <DashboardLayout
       title="Appointments"
       subtitle="View, book, and manage appointment bookings."
     >
-      {/* <div className="dashboard-header">
+      <div className="card content-toolbar appointments-toolbar">
         <div>
-          <h1>Appointments</h1>
-          <p>View, book, and manage appointment bookings.</p>
+          <h2>Appointments on {date}</h2>
+          <p>Filter the list by date or add a new appointment.</p>
         </div>
 
-        <div className="header-actions">
-          <button className="btn secondary" onClick={() => navigate("/admin")}>
-            Back to Dashboard
+        <div className="toolbar-actions">
+          <label className="inline-date-filter">
+            <span>Appointment Date</span>
+            <input
+              className="input"
+              type="date"
+              value={date}
+              onChange={handleDateChange}
+            />
+          </label>
+
+          <button
+            className="btn"
+            type="button"
+            onClick={() => setIsBookingOpen(true)}
+          >
+            + New Appointment
           </button>
 
-          <button className="btn" onClick={() => loadAppointments(date)}>
+          <button
+            className="btn secondary"
+            type="button"
+            onClick={() => loadAppointments(date)}
+          >
             Refresh
           </button>
         </div>
-      </div> */}
-
-      <div className="card dashboard-filter">
-        <label>Appointment Date</label>
-        <input
-          className="input"
-          type="date"
-          value={date}
-          onChange={handleDateChange}
-        />
       </div>
 
       {error ? <div className="card error">{error}</div> : null}
       {message ? <div className="card success">{message}</div> : null}
 
-      <div className="card">
-        <h2>Book Appointment</h2>
+      {isBookingOpen ? (
+        <div className="modal-backdrop" role="dialog" aria-modal="true">
+          <div className="modal-panel booking-modal">
+            <div className="modal-header">
+              <div>
+                <h2>Book Appointment</h2>
+                <p>Create a booking without moving the appointments list down.</p>
+              </div>
 
-        <form onSubmit={bookAppointment}>
-          <div className="form-grid">
-            <div>
-              <label>Client</label>
-              <select
-                className="input"
-                name="clientId"
-                value={bookingForm.clientId}
-                onChange={handleBookingChange}
+              <button
+                className="icon-btn"
+                type="button"
+                aria-label="Close booking form"
+                onClick={() => setIsBookingOpen(false)}
               >
-                <option value="">Select client</option>
-                {clients.map((client) => (
-                  <option key={client.id} value={client.id}>
-                    {client.name} ({client.email})
-                  </option>
-                ))}
-              </select>
+                ×
+              </button>
             </div>
 
-            <div>
-              <label>Service</label>
-              <select
-                className="input"
-                name="serviceId"
-                value={bookingForm.serviceId}
-                onChange={handleBookingChange}
-              >
-                <option value="">Select service</option>
-                {services.map((service) => (
-                  <option key={service.id} value={service.id}>
-                    {service.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label>Location</label>
-              <select
-                className="input"
-                name="locationId"
-                value={bookingForm.locationId}
-                onChange={handleBookingChange}
-              >
-                <option value="">Select location</option>
-                {locations.map((location) => (
-                  <option key={location.id} value={location.id}>
-                    {location.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div>
-              <label>Appointment Type</label>
-              <select
-                className="input"
-                name="appointmentType"
-                value={bookingForm.appointmentType}
-                onChange={handleBookingChange}
-                disabled
-              >
-                <option value="telehealth">Telehealth</option>
-                <option value="in_person">In Person</option>
-              </select>
-            </div>
+            {bookingFormMarkup}
           </div>
-
-          <div className="form-actions">
-            <button
-              className="btn secondary"
-              type="button"
-              onClick={checkSlots}
-              disabled={slotLoading}
-            >
-              {slotLoading ? "Checking..." : "Check Slots"}
-            </button>
-
-            <select
-              className="input slot-select"
-              name="startTime"
-              value={bookingForm.startTime}
-              onChange={handleBookingChange}
-            >
-              <option value="">Select slot</option>
-              {slots.map((slot) => (
-                <option key={slot.startTime} value={slot.startTime}>
-                  {slot.startTime} - {slot.endTime} (
-                  {slot.availableTherapistCount} therapist available)
-                </option>
-              ))}
-            </select>
-
-            <button className="btn" type="submit" disabled={bookingLoading}>
-              {bookingLoading ? "Booking..." : "Book Appointment"}
-            </button>
-          </div>
-        </form>
-      </div>
+        </div>
+      ) : null}
 
       {loading ? <div className="card">Loading appointments...</div> : null}
 
@@ -654,7 +688,7 @@ async function submitReschedule(event) {
         {appointments.length === 0 ? (
           <p>No appointments found for this date.</p>
         ) : (
-          <table className="table">
+          <table className="table appointments-table">
             <thead>
               <tr>
                 <th>Time</th>
@@ -681,7 +715,14 @@ async function submitReschedule(event) {
                     <small>{appointment.clientEmail}</small>
                   </td>
 
-                  <td>{appointment.therapistName}</td>
+                  <td>
+                    <div className="avatar-name">
+                      <span className="initials-avatar">
+                        {getInitials(appointment.therapistName)}
+                      </span>
+                      <span>{appointment.therapistName}</span>
+                    </div>
+                  </td>
                   <td>{appointment.serviceName}</td>
                   <td>{appointment.locationName}</td>
                   <td>{getRoomDisplay(appointment)}</td>
@@ -703,7 +744,7 @@ async function submitReschedule(event) {
                         </button>
 
                         <button
-                          className="btn danger small-btn"
+                          className="btn danger ghost small-btn"
                           onClick={() => cancelAppointment(appointment.id)}
                         >
                           Cancel
